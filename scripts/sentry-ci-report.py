@@ -54,13 +54,23 @@ APP = "hoghunter"
 # Keyed by the workflow's DISPLAY NAME (its `name:`), valued by the exact
 # `cron:` expression of its `schedule:` trigger.  When a cron lane is added or
 # changed, update it here in the same PR; scripts/test-sentry-ci-report.py
-# fails CI if a workflow's schedule is missing or differs.
+# fails CI if a workflow's schedule is missing or differs (a schedule listed in
+# UNMONITORED_SCHEDULES below is the one deliberate exception).
 CRON_SCHEDULES: dict[str, str] = {
     # .github/workflows/ios-testflight.yml: hourly scheduled ship gate.
     "Hog Hunter iOS TestFlight": "41 * * * *",
-    # .github/workflows/auto-merge-prs.yml: fleet auto-merge sweep (15 min).
-    "Auto-merge PRs": "*/15 * * * *",
 }
+
+# Scheduled workflows that deliberately send NO Crons check-in (AFC-626).
+# `auto-merge-prs.yml` asks for a 15-minute schedule, but GitHub starts it
+# about once an hour, so a `*/15` monitor recorded three misses for every real
+# run and stayed red while the sweep worked.  A missed sweep tick is harmless
+# (the next one picks the PR up), and a FAILED run still raises the error event
+# in main(), so the cron monitor added nothing but noise.  A schedule run of a
+# name listed here skips the check-in without the unmapped-schedule drift event
+# that an unlisted name would raise.
+UNMONITORED_SCHEDULES = frozenset({"Auto-merge PRs"})
+_UNMONITORED_FOLDED = {name.casefold() for name in UNMONITORED_SCHEDULES}
 
 DEFAULT_CHECKIN_MARGIN_MINUTES = 15
 # The check-in is only sent after the run completes (via workflow_run), and
@@ -72,6 +82,19 @@ _CRON_CHECKIN_MARGIN_FOLDED = {
     name.casefold(): margin for name, margin in CRON_CHECKIN_MARGIN_OVERRIDES.items()
 }
 _CRON_SCHEDULES_FOLDED = {name.casefold(): expr for name, expr in CRON_SCHEDULES.items()}
+
+# failure_issue_threshold: consecutive failed or missed check-ins before Sentry
+# opens an incident and turns the monitor red (AFC-626).  GitHub delays or drops
+# ticks of this hourly ship schedule, so one miss is routine and a wider margin
+# alone still misses a dropped tick.  Three in a row is a real stop.  An `error`
+# check-in counts toward the threshold too, so a job that keeps failing still
+# alerts, and its conclusion-based error event is unaffected.
+CRON_FAILURE_ISSUE_THRESHOLDS: dict[str, int] = {
+    "Hog Hunter iOS TestFlight": 3,
+}
+_CRON_FAILURE_THRESHOLD_FOLDED = {
+    name.casefold(): threshold for name, threshold in CRON_FAILURE_ISSUE_THRESHOLDS.items()
+}
 
 WORKFLOWS_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 
@@ -116,6 +139,22 @@ def find_cron_schedule_drift(known_names: set[str] | None) -> list[str]:
         return []
     folded = {name.casefold() for name in known_names}
     return sorted(key for key in CRON_SCHEDULES if key.casefold() not in folded)
+
+
+def monitor_config_for(workflow_name: str, cron_expr: str) -> dict:
+    """The upsert monitor_config sent with a workflow's Crons check-in."""
+    folded = workflow_name.casefold()
+    config = {
+        "schedule": {"type": "crontab", "value": cron_expr},
+        "checkin_margin": _CRON_CHECKIN_MARGIN_FOLDED.get(folded, DEFAULT_CHECKIN_MARGIN_MINUTES),
+        "max_runtime": 60,
+        "timezone": "UTC",
+    }
+    threshold = _CRON_FAILURE_THRESHOLD_FOLDED.get(folded)
+    if threshold:
+        config["failure_issue_threshold"] = threshold
+        config["recovery_threshold"] = 1
+    return config
 
 
 def parse_dsn(dsn: str) -> tuple[str, str, str]:
@@ -243,7 +282,12 @@ def main() -> int:
 
     if event == "schedule":
         cron_expr = _CRON_SCHEDULES_FOLDED.get(workflow_name.casefold())
-        if not cron_expr:
+        if workflow_name.casefold() in _UNMONITORED_FOLDED:
+            print(
+                f"Workflow '{workflow_name}' is listed in UNMONITORED_SCHEDULES; "
+                "no cron check-in sent."
+            )
+        elif not cron_expr:
             print(
                 f"::warning::Schedule-triggered run for '{workflow_name}' has no known cron "
                 "expression mapped in CRON_SCHEDULES; skipping check-in."
@@ -260,19 +304,11 @@ def main() -> int:
         else:
             checkin_status = "ok" if conclusion == "success" else "error"
             slug = monitor_slug(APP, workflow_name)
-            checkin_margin = _CRON_CHECKIN_MARGIN_FOLDED.get(
-                workflow_name.casefold(), DEFAULT_CHECKIN_MARGIN_MINUTES
-            )
             checkin_payload = {
                 "check_in_id": uuid.uuid4().hex,
                 "monitor_slug": slug,
                 "status": checkin_status,
-                "monitor_config": {
-                    "schedule": {"type": "crontab", "value": cron_expr},
-                    "checkin_margin": checkin_margin,
-                    "max_runtime": 60,
-                    "timezone": "UTC",
-                },
+                "monitor_config": monitor_config_for(workflow_name, cron_expr),
             }
             send_envelope(envelope_url, auth_header, "check_in", checkin_payload)
             print(
