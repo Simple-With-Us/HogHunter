@@ -67,8 +67,10 @@ class FingerprintTests(unittest.TestCase):
             name = name_match.group(1).strip().strip("\"'")
             self.assertEqual(len(crons), 1, f"{path.name}: one cron per workflow expected")
             found[name] = crons[0].strip()
-        unmonitored = {name for name in found if name in reporter.UNMONITORED_SCHEDULES}
-        self.assertEqual(unmonitored, set(reporter.UNMONITORED_SCHEDULES))
+        # Case-folded on both sides, like main() and find_cron_schedule_drift().
+        unmonitored_folded = {name.casefold() for name in reporter.UNMONITORED_SCHEDULES}
+        unmonitored = {name for name in found if name.casefold() in unmonitored_folded}
+        self.assertEqual({name.casefold() for name in unmonitored}, unmonitored_folded)
         self.assertEqual(
             reporter.CRON_SCHEDULES,
             {name: cron for name, cron in found.items() if name not in unmonitored},
@@ -111,7 +113,10 @@ class EnvelopeTests(unittest.TestCase):
             "WORKFLOW_RUN_ID": "1",
         }
         base.update(env)
-        with mock.patch.object(reporter.urllib.request, "urlopen", fake_urlopen):
+        # The stale-key drift guard is stubbed so these assertions do not depend
+        # on the live checkout's workflow names; ConfigDriftTests covers it.
+        with mock.patch.object(reporter.urllib.request, "urlopen", fake_urlopen), \
+                mock.patch.object(reporter, "find_cron_schedule_drift", return_value=[]):
             with mock.patch.dict(os.environ, base, clear=False):
                 if "SENTRY_FLEET_DSN" not in env:
                     os.environ.pop("SENTRY_FLEET_DSN", None)
@@ -171,6 +176,12 @@ class EnvelopeTests(unittest.TestCase):
         self.assertFalse(
             any("ci-report-config-drift" in item.get("fingerprint", []) for item in items))
 
+    def test_zero_failure_threshold_is_sent_not_dropped(self):
+        with mock.patch.dict(reporter._CRON_FAILURE_THRESHOLD_FOLDED, {"ci": 0}):
+            config = reporter.monitor_config_for("CI", "17 9 * * 1")
+        self.assertEqual(config["failure_issue_threshold"], 0)
+        self.assertEqual(config["recovery_threshold"], 1)
+
     def test_unlisted_monitor_keeps_sentry_default_threshold(self):
         config = reporter.monitor_config_for("CI", "17 9 * * 1")
         self.assertNotIn("failure_issue_threshold", config)
@@ -229,6 +240,43 @@ class EnvelopeTests(unittest.TestCase):
                 "WORKFLOW_RUN_ID": "1",
             }, clear=False):
                 self.assertEqual(reporter.main(), 0)
+
+
+class ConfigDriftTests(unittest.TestCase):
+    def test_stale_unmonitored_entry_is_reported_like_a_stale_cron_key(self):
+        live = set(reporter.CRON_SCHEDULES)
+        self.assertEqual(
+            reporter.find_cron_schedule_drift(live), sorted(reporter.UNMONITORED_SCHEDULES))
+
+    def test_unmonitored_entry_matches_live_names_case_insensitively(self):
+        live = {name.casefold() for name in reporter.CRON_SCHEDULES}
+        live |= {name.casefold() for name in reporter.UNMONITORED_SCHEDULES}
+        self.assertEqual(reporter.find_cron_schedule_drift(live), [])
+
+    def test_stale_unmonitored_entry_raises_the_stale_cron_key_event(self):
+        sent = []
+        env = {
+            "SENTRY_FLEET_DSN": "https://abc123@o1.ingest.example.test/42",
+            "WORKFLOW_NAME": "CI",
+            "WORKFLOW_CONCLUSION": "success",
+            "WORKFLOW_EVENT": "push",
+            "WORKFLOW_BRANCH": "main",
+            "WORKFLOW_ACTOR": "agent",
+            "WORKFLOW_RUN_URL": "https://example.test/run/1",
+            "WORKFLOW_RUN_ID": "1",
+        }
+        with mock.patch.object(
+            reporter, "discover_workflow_names", return_value=set(reporter.CRON_SCHEDULES)
+        ), mock.patch.object(
+            reporter, "send_envelope",
+            lambda url, auth, item_type, payload: sent.append((item_type, payload)),
+        ), mock.patch.dict(os.environ, env, clear=False):
+            self.assertEqual(reporter.main(), 0)
+        self.assertEqual([item_type for item_type, _ in sent], ["event"])
+        payload = sent[0][1]
+        self.assertEqual(
+            payload["fingerprint"], ["ci-report-config-drift", "hoghunter", "stale-cron-key"])
+        self.assertEqual(payload["extra"]["stale_keys"], sorted(reporter.UNMONITORED_SCHEDULES))
 
 
 class WorkflowNameTests(unittest.TestCase):
