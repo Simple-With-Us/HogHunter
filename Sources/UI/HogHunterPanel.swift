@@ -430,33 +430,37 @@ struct HogHunterPanel: View {
     private var overview: some View {
         VStack(alignment: .leading, spacing: 12) {
             ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack(alignment: .top, spacing: 10) {
-                        cpuHistoryCard
-                        Meter(title: "Memory", value: store.pulse.memoryPercent,
-                              caption: store.memorySizeCaption,
-                              severity: Severity.forPressure(store.pulse.pressure),
-                              accessibilityDetail: store.memoryCaption)
-                            .frame(width: 260)
+                GeometryReader { scroll in
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(alignment: .top, spacing: 10) {
+                            cpuHistoryCard
+                            Meter(title: "Memory", value: store.pulse.memoryPercent,
+                                  caption: store.memorySizeCaption,
+                                  severity: Severity.forPressure(store.pulse.pressure),
+                                  accessibilityDetail: store.memoryCaption)
+                                .frame(width: 260)
+                        }
+                        .frame(height: 94)
+                        pillRow(memoryPills + thermalPills)
+                        capacityCards
+                        if !store.maintain.vpsStore.configuredHost.isEmpty {
+                            serverStrip
+                        }
+                        captions
                     }
-                    .frame(height: 94)
-                    pillRow(memoryPills + thermalPills)
-                    capacityCards
-                    if !store.maintain.vpsStore.configuredHost.isEmpty {
-                        serverStrip
-                    }
-                    captions
+                    .frame(minHeight: scroll.size.height * 1.1)
+                    .background(
+                        GeometryReader { summary in
+                            Color.clear.preference(key: OverviewSummaryHeight.self, value: summary.size.height)
+                        }
+                    )
                 }
-                .background(
-                    GeometryReader { summary in
-                        Color.clear.preference(key: OverviewSummaryHeight.self, value: summary.size.height)
-                    }
-                )
             }
             .frame(minHeight: 200, maxHeight: .infinity)
+            .layoutPriority(1)
             .accessibilityLabel("Overview summary, scroll for capacity and captions")
             activitySection
-                .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
+                .frame(minHeight: 100, alignment: .topLeading)
         }
     }
 
