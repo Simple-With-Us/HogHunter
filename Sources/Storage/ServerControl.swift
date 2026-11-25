@@ -245,8 +245,7 @@ enum SSHCommand {
                 proc.standardOutput = outHandle
                 proc.standardError = errHandle
 
-                let resumeLock = NSLock()
-                var hasResumed = false
+                let hasResumed = OSAllocatedUnfairLock(initialState: false)
 
                 let timeoutTimer = DispatchSource.makeTimerSource()
                 timeoutTimer.schedule(deadline: .now() + timeout)
@@ -264,13 +263,12 @@ enum SSHCommand {
                     try? FileManager.default.removeItem(at: outURL)
                     try? FileManager.default.removeItem(at: errURL)
 
-                    resumeLock.lock()
-                    if hasResumed {
-                        resumeLock.unlock()
-                        return
+                    let alreadyResumed = hasResumed.withLock { flag in
+                        if flag { return true }
+                        flag = true
+                        return false
                     }
-                    hasResumed = true
-                    resumeLock.unlock()
+                    if alreadyResumed { return }
 
                     if finished.terminationStatus == 0 {
                         continuation.resume(returning: String(data: outData, encoding: .utf8) ?? "")
@@ -307,10 +305,11 @@ enum SSHCommand {
                     try? FileManager.default.removeItem(at: outURL)
                     try? FileManager.default.removeItem(at: errURL)
 
-                    resumeLock.lock()
-                    let already = hasResumed
-                    hasResumed = true
-                    resumeLock.unlock()
+                    let already = hasResumed.withLock { flag in
+                        if flag { return true }
+                        flag = true
+                        return false
+                    }
 
                     if !already {
                         continuation.resume(throwing: error)
