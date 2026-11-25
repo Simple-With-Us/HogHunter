@@ -29,7 +29,7 @@ final class StorageScannerTests: XCTestCase {
         try? FileManager.default.removeItem(at: tempHome)
     }
 
-    private final class ProbeFileManager: FileManager, @unchecked Sendable {
+    private final class ProbeFileManager: FileManager {
         var probes: [String] = []
         override func fileExists(atPath path: String, isDirectory: UnsafeMutablePointer<ObjCBool>?) -> Bool {
             probes.append(path)

@@ -143,7 +143,9 @@ final class OverviewLayoutTests: XCTestCase {
             .frame(width: windowWidth, height: windowHeight)
         let host = NSHostingView(rootView: root)
         host.appearance = NSAppearance(named: .aqua)
-        let fitted = host.sizeThatFits(in: CGSize(width: windowWidth, height: windowHeight))
+        host.frame = CGRect(origin: .zero, size: CGSize(width: windowWidth, height: windowHeight))
+        host.layoutSubtreeIfNeeded()
+        let fitted = host.sizeThatFits(CGSize(width: windowWidth, height: windowHeight))
         XCTAssertLessThanOrEqual(fitted.height, windowHeight + 1,
             "the overview panel wants \(Int(fitted.height))pt but was offered \(Int(windowHeight))pt")
     }
