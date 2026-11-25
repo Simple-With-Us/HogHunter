@@ -176,10 +176,10 @@ class EnvelopeTests(unittest.TestCase):
         self.assertFalse(
             any("ci-report-config-drift" in item.get("fingerprint", []) for item in items))
 
-    def test_zero_failure_threshold_is_sent_not_dropped(self):
+    def test_zero_failure_threshold_is_sent_as_sentrys_minimum(self):
         with mock.patch.dict(reporter._CRON_FAILURE_THRESHOLD_FOLDED, {"ci": 0}):
             config = reporter.monitor_config_for("CI", "17 9 * * 1")
-        self.assertEqual(config["failure_issue_threshold"], 0)
+        self.assertEqual(config["failure_issue_threshold"], 1)
         self.assertEqual(config["recovery_threshold"], 1)
 
     def test_unlisted_monitor_keeps_sentry_default_threshold(self):
