@@ -12,6 +12,23 @@ import CoreFoundation
 ///
 /// Nothing here runs from a unit test: the fetcher is injected, and the
 /// default one refuses to run under XCTest.
+/// A boolean "has resumed" flag guarded by a lock, safe to capture in
+/// `@Sendable` closures.  The instance is a `let` constant (a reference),
+/// so Swift 6 accepts capturing it; the mutable `flag` lives inside the
+/// class and is always touched under `lock`.
+private final class ResumeOnceBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var flag = false
+
+    /// Atomically sets `flag` to true and returns the previous value.
+    func setOnce() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let previous = flag
+        flag = true
+        return previous
+    }
+
 @MainActor
 final class ServerControl: ObservableObject {
     enum Outcome: Equatable {
@@ -245,7 +262,7 @@ enum SSHCommand {
                 proc.standardOutput = outHandle
                 proc.standardError = errHandle
 
-                let hasResumed = OSAllocatedUnfairLock(initialState: false)
+                let hasResumed = ResumeOnceBox()
 
                 let timeoutTimer = DispatchSource.makeTimerSource()
                 timeoutTimer.schedule(deadline: .now() + timeout)
@@ -263,12 +280,7 @@ enum SSHCommand {
                     try? FileManager.default.removeItem(at: outURL)
                     try? FileManager.default.removeItem(at: errURL)
 
-                    let alreadyResumed = hasResumed.withLock { flag in
-                        if flag { return true }
-                        flag = true
-                        return false
-                    }
-                    if alreadyResumed { return }
+                    if hasResumed.setOnce() { return }
 
                     if finished.terminationStatus == 0 {
                         continuation.resume(returning: String(data: outData, encoding: .utf8) ?? "")
@@ -305,11 +317,7 @@ enum SSHCommand {
                     try? FileManager.default.removeItem(at: outURL)
                     try? FileManager.default.removeItem(at: errURL)
 
-                    let already = hasResumed.withLock { flag in
-                        if flag { return true }
-                        flag = true
-                        return false
-                    }
+                    let already = hasResumed.setOnce()
 
                     if !already {
                         continuation.resume(throwing: error)
