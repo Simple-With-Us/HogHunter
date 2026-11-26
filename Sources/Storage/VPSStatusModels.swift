@@ -598,7 +598,9 @@ struct VPSMaintenance: Codable, Equatable, Sendable {
         let finishedAt: String?
         let mode: String?
         let status: String?
-        let reclaimedBytes: Int64?
+        /// Signed: the measured change in the volume's free space while the
+        /// run happened, which other activity can make negative.
+        let observedFreeDeltaBytes: Int64?
         let removedCount: Int?
         let candidateCount: Int?
         let strategyCount: Int?
@@ -607,7 +609,7 @@ struct VPSMaintenance: Codable, Equatable, Sendable {
             case finishedAt = "finished_at"
             case mode
             case status
-            case reclaimedBytes = "reclaimed_bytes"
+            case observedFreeDeltaBytes = "observed_free_delta_bytes"
             case removedCount = "removed_count"
             case candidateCount = "candidate_count"
             case strategyCount = "strategy_count"

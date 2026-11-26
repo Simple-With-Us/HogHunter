@@ -135,7 +135,10 @@ struct RemoteMaintenanceCard: View {
     private func historyDetail(_ run: VPSMaintenance.Run) -> String {
         let mode = run.mode == "scheduled" ? "Scheduled" : "Run"
         var parts = [mode, run.status.map { $0.prefix(1).uppercased() + $0.dropFirst() } ?? "Status unknown"]
-        if let freed = run.reclaimedBytes { parts.append("\(HogFormat.memory(UInt64(freed))) freed") }
+        if let delta = run.observedFreeDeltaBytes {
+            if delta > 0 { parts.append("\(HogFormat.memory(UInt64(delta))) freed") }
+            else if delta < 0 { parts.append("space shrank") }
+        }
         if let removed = run.removedCount, removed > 0 { parts.append("\(removed) removed") }
         else if let candidates = run.candidateCount, candidates > 0 { parts.append("\(candidates) eligible") }
         return parts.joined(separator: " · ")

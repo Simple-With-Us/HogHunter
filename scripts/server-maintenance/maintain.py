@@ -555,10 +555,9 @@ class Maintenance:
                     item["candidate_count"] = len(candidates)
                     item["inventory_complete"] = True
                     result["candidate_count"] += len(candidates)
-                    if candidates:
-                        sizes = self.candidate_bytes(strategy, candidates)
-                        if sizes is not None:
-                            item["reclaimable_bytes"] = sizes
+                    sizes = self.candidate_bytes(strategy, candidates)
+                    if sizes is not None:
+                        item["reclaimable_bytes"] = sizes
                     if not candidates:
                         continue
                     if not mutating:

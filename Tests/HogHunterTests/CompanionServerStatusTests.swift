@@ -80,7 +80,7 @@ private func maintenanceRecord(runs: Int, now: Date = Date()) -> VPSMaintenance 
                 finishedAt: iso(now.addingTimeInterval(-Double(index) * 600)),
                 mode: index == 0 ? "run" : "scheduled",
                 status: "ran",
-                reclaimedBytes: 1_000 + Int64(index),
+                observedFreeDeltaBytes: 1_000 + Int64(index),
                 removedCount: index,
                 candidateCount: index + 2,
                 strategyCount: 3
@@ -155,7 +155,7 @@ final class CompanionServerStatusBuilderTests: XCTestCase {
         let newest = maintenance?.history?.first
         XCTAssertNotNil(newest?.finishedAt, "the finished time must parse")
         XCTAssertEqual(newest?.mode, "run")
-        XCTAssertEqual(newest?.reclaimedBytes, 1_000)
+        XCTAssertEqual(newest?.observedFreeDeltaBytes, 1_000)
         XCTAssertEqual(newest?.removedCount, 0)
         XCTAssertEqual(newest?.candidateCount, 2)
     }
@@ -177,13 +177,13 @@ final class CompanionServerStatusBuilderTests: XCTestCase {
         {"generated_at":"2026-11-26T00:00:00Z","host":"h","devices":{},
          "maintenance":{"thresholds":{"used_percent_at_or_above":80,"free_bytes_at_or_below":26843545600},
            "history":[{"finished_at":"2026-11-26T01:00:00+00:00","mode":"run","status":"ran",
-                       "reclaimed_bytes":5,"removed_count":2,"candidate_count":3,"strategy_count":1}]}}
+                       "observed_free_delta_bytes":5,"removed_count":2,"candidate_count":3,"strategy_count":1}]}}
         """
         let reading = try JSONDecoder().decode(VPSStatusSnapshot.self, from: Data(json.utf8))
         XCTAssertEqual(reading.maintenance?.thresholds?.usedPercentAtOrAbove, 80)
         XCTAssertEqual(reading.maintenance?.thresholds?.freeBytesAtOrBelow, 26_843_545_600)
         XCTAssertNotNil(reading.maintenance?.history.first?.finishedAtDate, "ISO with offset parses")
-        XCTAssertEqual(reading.maintenance?.history.first?.reclaimedBytes, 5)
+        XCTAssertEqual(reading.maintenance?.history.first?.observedFreeDeltaBytes, 5)
     }
 
     func testAnUnreadableTimeOrAClockFarAheadIsNotCurrent() {

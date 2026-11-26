@@ -436,6 +436,13 @@ class MaintenanceTests(unittest.TestCase):
         self.assertFalse(result['reclaimable_complete'])
         self.assertEqual(result['reclaimable_bytes'], 0)
 
+    def test_a_clean_strategy_still_states_zero_bytes(self):
+        result = self.tool.execute('scan', ['package-cache'], manual=True)
+        item = result['strategies'][0]
+        self.assertEqual(item['candidate_count'], 0)
+        self.assertEqual(item['reclaimable_bytes'], 0, "zero is a known size, not an unknown one")
+        self.assertTrue(result['reclaimable_complete'])
+
     def test_size_text_bytes_is_strict(self):
         self.assertEqual(m.size_text_bytes('1.5MB'), 1500000)
         self.assertEqual(m.size_text_bytes('12B'), 12)

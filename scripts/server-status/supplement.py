@@ -877,8 +877,8 @@ def maintenance_history(path=MAINTENANCE_AUDIT, limit=MAINTENANCE_HISTORY_LIMIT)
             'finished_at': finished if isinstance(finished, str) and len(finished) <= 64 else None,
             'mode': mode if mode in ('scan', 'plan', 'run', 'scheduled') else None,
             'status': status if isinstance(status, str) and len(status) <= 24 else None,
-            'reclaimed_bytes': (int(delta) if isinstance(delta, int) and not isinstance(delta, bool)
-                               and delta >= 0 else None),
+            'observed_free_delta_bytes': (int(delta) if isinstance(delta, int)
+                                         and not isinstance(delta, bool) else None),
             'removed_count': removed,
             'candidate_count': candidates,
             'strategy_count': len([s for s in strategies if isinstance(s, dict)]),

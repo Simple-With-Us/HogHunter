@@ -485,11 +485,11 @@ class SupplementTests(unittest.TestCase):
         self.assertEqual([row['mode'] for row in history], [None, 'scheduled', 'run'])
         newest = history[-1]
         self.assertEqual(newest['status'], 'ran')
-        self.assertEqual(newest['reclaimed_bytes'], 123456)
+        self.assertEqual(newest['observed_free_delta_bytes'], 123456)
         self.assertEqual(newest['removed_count'], 3)
         self.assertEqual(newest['candidate_count'], 4)
         self.assertEqual(newest['strategy_count'], 2)
-        self.assertIsNone(history[0]['reclaimed_bytes'])
+        self.assertEqual(history[0]['observed_free_delta_bytes'], -5, "signed, never dropped")
         self.assertEqual(history[0]['removed_count'], 0)
 
     def test_maintenance_history_limits_and_reports_unreadable(self):
@@ -500,7 +500,7 @@ class SupplementTests(unittest.TestCase):
                                     for i in range(30)))
             value = module.maintenance_history(path, limit=5)
             self.assertEqual(len(value['history']), 5)
-            self.assertEqual(value['history'][0]['reclaimed_bytes'], 29)
+            self.assertEqual(value['history'][0]['observed_free_delta_bytes'], 29)
             self.assertIsNone(module.maintenance_history(Path(directory) / 'missing.jsonl'))
 
     def test_maintenance_history_reads_only_the_log_tail(self):
@@ -515,8 +515,8 @@ class SupplementTests(unittest.TestCase):
             value = module.maintenance_history(path)
         self.assertEqual(len(value['history']), 10)
         self.assertIsNotNone(value['history'][0])
-        newest = value['history'][0]['reclaimed_bytes']
-        self.assertGreater(newest, value['history'][-1]['reclaimed_bytes'])
+        newest = value['history'][0]['observed_free_delta_bytes']
+        self.assertGreater(newest, value['history'][-1]['observed_free_delta_bytes'])
 
     def test_atomic_write(self):
         with tempfile.TemporaryDirectory() as directory:

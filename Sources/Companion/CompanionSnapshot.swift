@@ -1315,7 +1315,8 @@ struct CompanionServerMaintenanceRun: Codable, Equatable, Sendable {
     var finishedAt: Date? = nil
     var mode: String? = nil
     var status: String? = nil
-    var reclaimedBytes: Int64? = nil
+    /// Signed measured free-space change; other activity can make it negative.
+    var observedFreeDeltaBytes: Int64? = nil
     var removedCount: Int? = nil
     var candidateCount: Int? = nil
 }

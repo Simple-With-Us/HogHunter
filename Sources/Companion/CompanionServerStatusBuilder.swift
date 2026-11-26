@@ -104,7 +104,7 @@ enum CompanionServerStatusBuilder {
                     finishedAt: run.finishedAtDate,
                     mode: run.mode,
                     status: run.status,
-                    reclaimedBytes: run.reclaimedBytes,
+                    observedFreeDeltaBytes: run.observedFreeDeltaBytes,
                     removedCount: run.removedCount,
                     candidateCount: run.candidateCount
                 )
