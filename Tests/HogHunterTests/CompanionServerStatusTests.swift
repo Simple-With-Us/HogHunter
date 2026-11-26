@@ -186,6 +186,17 @@ final class CompanionServerStatusBuilderTests: XCTestCase {
         XCTAssertEqual(reading.maintenance?.history?.first?.observedFreeDeltaBytes, 5)
     }
 
+    func testALegacyReclaimedBytesKeyStillShows() throws {
+        let json = """
+        {"generated_at":"2026-11-26T00:00:00Z","host":"h","devices":{},
+         "maintenance":{"thresholds":null,"history":[{"finished_at":"2026-11-26T01:00:00+00:00",
+           "mode":"run","status":"ran","reclaimed_bytes":4096,"removed_count":1,
+           "candidate_count":1,"strategy_count":1}]}}
+        """
+        let reading = try JSONDecoder().decode(VPSStatusSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(reading.maintenance?.history?.first?.observedFreeDeltaBytes, 4096)
+    }
+
     func testMaintenanceWithoutHistoryKeepsTheWholeSnapshot() throws {
         // A maintenance object with no history key must never discard the
         // reading: an older or partial publisher still decodes.

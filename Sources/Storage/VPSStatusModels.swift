@@ -610,9 +610,48 @@ struct VPSMaintenance: Codable, Equatable, Sendable {
             case mode
             case status
             case observedFreeDeltaBytes = "observed_free_delta_bytes"
+            case reclaimedBytes = "reclaimed_bytes"
             case removedCount = "removed_count"
             case candidateCount = "candidate_count"
             case strategyCount = "strategy_count"
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            finishedAt = try container.decodeIfPresent(String.self, forKey: .finishedAt)
+            mode = try container.decodeIfPresent(String.self, forKey: .mode)
+            status = try container.decodeIfPresent(String.self, forKey: .status)
+            // The figure was briefly published as reclaimed_bytes before it
+            // was renamed to its honest name; a snapshot from that window
+            // still shows its freed bytes instead of a blank.
+            observedFreeDeltaBytes = try container.decodeIfPresent(Int64.self, forKey: .observedFreeDeltaBytes)
+                ?? container.decodeIfPresent(Int64.self, forKey: .reclaimedBytes)
+            removedCount = try container.decodeIfPresent(Int.self, forKey: .removedCount)
+            candidateCount = try container.decodeIfPresent(Int.self, forKey: .candidateCount)
+            strategyCount = try container.decodeIfPresent(Int.self, forKey: .strategyCount)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeIfPresent(finishedAt, forKey: .finishedAt)
+            try container.encodeIfPresent(mode, forKey: .mode)
+            try container.encodeIfPresent(status, forKey: .status)
+            try container.encodeIfPresent(observedFreeDeltaBytes, forKey: .observedFreeDeltaBytes)
+            try container.encodeIfPresent(removedCount, forKey: .removedCount)
+            try container.encodeIfPresent(candidateCount, forKey: .candidateCount)
+            try container.encodeIfPresent(strategyCount, forKey: .strategyCount)
+        }
+
+        init(finishedAt: String?, mode: String?, status: String?,
+             observedFreeDeltaBytes: Int64?, removedCount: Int?,
+             candidateCount: Int?, strategyCount: Int?) {
+            self.finishedAt = finishedAt
+            self.mode = mode
+            self.status = status
+            self.observedFreeDeltaBytes = observedFreeDeltaBytes
+            self.removedCount = removedCount
+            self.candidateCount = candidateCount
+            self.strategyCount = strategyCount
         }
 
         var finishedAtDate: Date? { VPSStatusSnapshot.date(fromISO8601: finishedAt) }
