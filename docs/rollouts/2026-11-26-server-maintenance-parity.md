@@ -1,6 +1,6 @@
 # Server Maintenance Parity: Schedule, Reclaimable Bytes and Run History (2026-11-26)
 
-Owner direction, 2026-11-26: "help bring parity to server resource mgmt vs mac resource mgmt, and parity to ios displays+controls vs mac displays+controls".  This note covers the server-resource half; the companion display half of the same batch is [#402](https://github.com/Simple-With-Us/HogHunter/pull/402).  The audit it produces is what the companion server block now carries.
+Owner direction, 2026-11-26: "help bring parity to server resource mgmt vs mac resource mgmt, and parity to ios displays+controls vs mac displays+controls".  This note covers the server-resource half; the companion display half of the same batch is its own pull request against this branch's base.  The audit it produces is what the companion server block now carries.
 
 ## What the asymmetry was
 
