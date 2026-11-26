@@ -1089,7 +1089,8 @@ private struct ServerMaintenanceSection: View {
     private var chosenTitles: String { chosen.map(ServerActionOutcome.strategyTitle).joined(separator: ", ") }
 
     var body: some View {
-        if snapshot.remoteServerControlAllowed == true {
+        Group {
+            if snapshot.remoteServerControlAllowed == true {
             Section {
                 ForEach(CompanionServerControl.strategies, id: \.self) { strategy in
                     Toggle(ServerActionOutcome.strategyTitle(strategy), isOn: Binding(
@@ -1137,7 +1138,54 @@ private struct ServerMaintenanceSection: View {
             } footer: {
                 Text("Only age-qualified, unused items are eligible.\u{00A0} Containers, volumes and active logs are protected.")
             }
+            }
         }
+        serverHistory
+    }
+
+    /// The server's own record, matching the Mac's Maintenance tab: the gate
+    /// its scheduled run uses and the last finished runs.  Counts and
+    /// measured bytes only.
+    @ViewBuilder private var serverHistory: some View {
+        if let maintenance = snapshot.server?.maintenance {
+            Section {
+                if let percent = maintenance.thresholdUsedPercent, let free = maintenance.thresholdFreeBytes {
+                    Text("The server's own schedule wakes at \(Int(percent))% used or \(Self.bytes(free)) free.")
+                        .foregroundStyle(.secondary)
+                }
+                let runs = maintenance.history ?? []
+                if runs.isEmpty {
+                    Text("No finished server maintenance runs yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(runs.prefix(5).enumerated()), id: \.offset) { _, run in
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(run.finishedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Time unknown")
+                            Spacer()
+                            Text(Self.detail(run))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } header: {
+                Text("Recent Server Runs")
+            } footer: {
+                Text("The server records its own scheduled and manual maintenance.\u{00A0} Times follow this phone's clock.")
+            }
+        }
+    }
+
+    private static func bytes(_ value: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: max(0, value), countStyle: .memory)
+    }
+
+    private static func detail(_ run: CompanionServerMaintenanceRun) -> String {
+        let mode = run.mode == "scheduled" ? "Scheduled" : "Run"
+        var parts = [mode, run.status.map { $0.prefix(1).uppercased() + $0.dropFirst() } ?? "Status unknown"]
+        if let freed = run.reclaimedBytes { parts.append("\(bytes(freed)) freed") }
+        if let removed = run.removedCount, removed > 0 { parts.append("\(removed) removed") }
+        else if let candidates = run.candidateCount, candidates > 0 { parts.append("\(candidates) eligible") }
+        return parts.joined(separator: " · ")
     }
 
     private func run(acknowledged: Bool) {

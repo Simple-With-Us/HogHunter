@@ -1298,6 +1298,28 @@ enum CompanionServerActionOutcome: Equatable, Sendable {
     }
 }
 
+/// The server's own maintenance record.  Counts and measured bytes only, so
+/// the phone never learns a path, an argument or a strategy name from it.
+struct CompanionServerMaintenance: Codable, Equatable, Sendable {
+    /// How many finished runs travel; the server keeps the same bound.
+    static let historyLimit = 10
+    /// The scheduled run wakes at or above this used percent...
+    var thresholdUsedPercent: Double? = nil
+    /// ...or at or below this free level.
+    var thresholdFreeBytes: Int64? = nil
+    var history: [CompanionServerMaintenanceRun]? = nil
+}
+
+/// One finished server maintenance run.
+struct CompanionServerMaintenanceRun: Codable, Equatable, Sendable {
+    var finishedAt: Date? = nil
+    var mode: String? = nil
+    var status: String? = nil
+    var reclaimedBytes: Int64? = nil
+    var removedCount: Int? = nil
+    var candidateCount: Int? = nil
+}
+
 /// What a server maintenance scan or run found, in the Mac card's words.
 struct CompanionServerMaintenanceSummary: Codable, Equatable, Sendable {
     var mode: String
@@ -1373,6 +1395,9 @@ struct CompanionServerStatus: Codable, Equatable, Sendable {
     var processes: [CompanionServerProcess]? = nil
     var processCount: Int? = nil
     var workloads: [CompanionServerWorkload]? = nil
+    /// The server's own maintenance record: the pressure gate its scheduled
+    /// run uses and the last finished runs, newest first.
+    var maintenance: CompanionServerMaintenance? = nil
 
     /// Whether anything in the block came from a reading.
     var hasReading: Bool { generatedAt != nil || cpu != nil || memory != nil || devices?.isEmpty == false }

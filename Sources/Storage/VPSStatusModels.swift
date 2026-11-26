@@ -20,6 +20,10 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
     let processes: [VPSProcess]?
     /// The Coolify workloads the server runs.
     let coolify: [VPSCoolifyResource]?
+    /// The server's own maintenance record: the pressure gate its scheduled
+    /// run uses and the last finished runs.  Nil until the supplement that
+    /// publishes it is deployed.
+    let maintenance: VPSMaintenance?
 
     enum CodingKeys: String, CodingKey {
         case generatedAt = "generated_at"
@@ -37,6 +41,7 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         case directorySamples = "directory_samples"
         case processes
         case coolify
+        case maintenance
     }
 
     init(
@@ -54,7 +59,8 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         databaseSamples: [VPSSizeSample]? = nil,
         directorySamples: [VPSSizeSample]? = nil,
         processes: [VPSProcess]? = nil,
-        coolify: [VPSCoolifyResource]? = nil
+        coolify: [VPSCoolifyResource]? = nil,
+        maintenance: VPSMaintenance? = nil
     ) {
         self.generatedAt = generatedAt
         self.host = host
@@ -71,6 +77,7 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         self.directorySamples = directorySamples
         self.processes = processes
         self.coolify = coolify
+        self.maintenance = maintenance
     }
 
     private static let isoFormatter: ISO8601DateFormatter = {
@@ -85,8 +92,12 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         return f
     }()
 
-    var generatedAtDate: Date? {
-        Self.isoFractionalFormatter.date(from: generatedAt) ?? Self.isoFormatter.date(from: generatedAt)
+    var generatedAtDate: Date? { Self.date(fromISO8601: generatedAt) }
+
+    /// One parser for every server timestamp, fractional or not.
+    static func date(fromISO8601 value: String?) -> Date? {
+        guard let value, !value.isEmpty else { return nil }
+        return isoFractionalFormatter.date(from: value) ?? isoFormatter.date(from: value)
     }
 
     func relativeTimeString(relativeTo now: Date = Date()) -> String {
@@ -568,4 +579,43 @@ struct VPSBlobStorage: Codable, Equatable, Sendable {
         case changeBytes = "change_bytes"
         case baselineStatus = "baseline_status"
     }
+}
+
+/// The server maintenance audit's summary, as the supplement publishes it.
+/// Counts and measured bytes only: no path, argument, owner or strategy name.
+struct VPSMaintenance: Codable, Equatable, Sendable {
+    struct Thresholds: Codable, Equatable, Sendable {
+        let usedPercentAtOrAbove: Double
+        let freeBytesAtOrBelow: Int64
+
+        enum CodingKeys: String, CodingKey {
+            case usedPercentAtOrAbove = "used_percent_at_or_above"
+            case freeBytesAtOrBelow = "free_bytes_at_or_below"
+        }
+    }
+
+    struct Run: Codable, Equatable, Sendable {
+        let finishedAt: String?
+        let mode: String?
+        let status: String?
+        let reclaimedBytes: Int64?
+        let removedCount: Int?
+        let candidateCount: Int?
+        let strategyCount: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case finishedAt = "finished_at"
+            case mode
+            case status
+            case reclaimedBytes = "reclaimed_bytes"
+            case removedCount = "removed_count"
+            case candidateCount = "candidate_count"
+            case strategyCount = "strategy_count"
+        }
+
+        var finishedAtDate: Date? { VPSStatusSnapshot.date(fromISO8601: finishedAt) }
+    }
+
+    let thresholds: Thresholds?
+    let history: [Run]
 }
