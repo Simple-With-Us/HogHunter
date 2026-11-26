@@ -647,6 +647,31 @@ final class CompanionAppStorageTests: XCTestCase {
         XCTAssertNotNil(summary?.topApps)
     }
 
+    func testAppStorageRowWithoutRunningStateStillDecodes() {
+        // An older Mac never sends isRunning; the phone must keep working and
+        // the Running filter must simply exclude rows it cannot vouch for.
+        let json = """
+        {"id":"a","name":"An App","bundleId":"com.example.app","totalBytes":10,
+         "bundleBytes":6,"hiddenBytes":4,"totalText":"10 B","bundleText":"6 B",
+         "hiddenText":"4 B","anyApproximate":false,"isHiddenHeavy":false}
+        """
+        let row = try? JSONDecoder().decode(CompanionAppStorageRow.self, from: Data(json.utf8))
+        XCTAssertNotNil(row)
+        XCTAssertNil(row?.isRunning)
+    }
+
+    func testAppStorageRowCarriesTheRunningStateWhenTheMacSendsIt() {
+        let row = CompanionAppStorageRow(
+            id: "a", name: "An App", bundleId: nil,
+            totalBytes: 10, bundleBytes: 6, hiddenBytes: 4,
+            totalText: "10 B", bundleText: "6 B", hiddenText: "4 B",
+            anyApproximate: false, isHiddenHeavy: false, isRunning: true
+        )
+        let data = try? JSONEncoder().encode(row)
+        let decoded = data.flatMap { try? JSONDecoder().decode(CompanionAppStorageRow.self, from: $0) }
+        XCTAssertEqual(decoded?.isRunning, true)
+    }
+
     func testCachedTopAppsStartsEmptyAfterInvalidate() {
         CompanionSnapshotBuilder.invalidateTopAppsCache()
         XCTAssertTrue(CompanionSnapshotBuilder.cachedTopApps().isEmpty)

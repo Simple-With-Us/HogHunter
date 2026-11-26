@@ -284,7 +284,9 @@ enum CompanionSnapshotBuilder {
 
     nonisolated(unsafe) private static var topAppsCache: TopAppsCacheEntry?
     private static let topAppsLockInterval: TimeInterval = 5 * 60
-    private static let topAppsLimit = 8
+    /// Enough rows for the phone's All/Running browser to be useful; the
+    /// Storage pane on the Mac keeps the full list.
+    private static let topAppsLimit = 40
     private static let topAppsQueue = DispatchQueue(label: "hoghunter.companion.topapps", qos: .utility)
     private static var topAppsScanInFlight = false
 
@@ -344,7 +346,8 @@ enum CompanionSnapshotBuilder {
                         bundleText: HogFormat.memory(usage.bundleBytes),
                         hiddenText: HogFormat.memory(usage.hiddenBytes),
                         anyApproximate: usage.anyApproximate,
-                        isHiddenHeavy: usage.isHiddenHeavy
+                        isHiddenHeavy: usage.isHiddenHeavy,
+                        isRunning: usage.isRunning
                     )
                 }
             DispatchQueue.main.async {

@@ -1145,6 +1145,9 @@ struct CompanionAppStorageRow: Codable, Equatable, Identifiable {
     var anyApproximate: Bool
     /// True when hidden bytes are at least 5x the bundle and over 200 MB.
     var isHiddenHeavy: Bool
+    /// Whether the app was running when the Mac scanned.  Optional so an
+    /// older Mac's snapshot still decodes; nil means the Mac did not say.
+    var isRunning: Bool? = nil
 }
 
 struct CompanionNetworkRow: Codable, Equatable, Identifiable {
