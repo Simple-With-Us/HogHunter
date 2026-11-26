@@ -816,6 +816,78 @@ def atomic_write(path, value):
             os.unlink(temporary)
 
 
+MAINTENANCE_AUDIT = Path('/var/log/hoghunter-maintenance.jsonl')
+MAINTENANCE_HISTORY_LIMIT = 10
+
+def maintenance_history(path=MAINTENANCE_AUDIT, limit=MAINTENANCE_HISTORY_LIMIT):
+    """The last few finished server-maintenance runs, for the server card.
+
+    Reads at most the tail of the audit log and keeps one summary row per
+    finished run: when, mode, status, measured reclaim and item counts.
+    Strategy ids appear only inside the counts; no path, argument or owner
+    from the record travels, and anything malformed is skipped rather than
+    guessed.  Returns None when the log cannot be read so the card can say
+    the history is unavailable instead of empty.
+    """
+    try:
+        size = path.stat().st_size
+        with path.open('rb') as stream:
+            start = max(0, size - 262144)
+            stream.seek(start)
+            data = stream.read()
+    except OSError:
+        return None
+    lines = data.splitlines()
+    if start and lines:
+        lines = lines[1:]
+    history = []
+    thresholds = None
+    for line in reversed(lines):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        if thresholds is None and record.get('event') == 'finished':
+            value = record.get('thresholds')
+            if isinstance(value, dict):
+                percent = value.get('used_percent_at_or_above')
+                free = value.get('free_bytes_at_or_below')
+                if (isinstance(percent, (int, float)) and not isinstance(percent, bool)
+                        and isinstance(free, int) and not isinstance(free, bool) and free >= 0):
+                    thresholds = {'used_percent_at_or_above': float(percent),
+                                  'free_bytes_at_or_below': int(free)}
+        if record.get('event') != 'finished':
+            continue
+        strategies = record.get('strategies') if isinstance(record.get('strategies'), list) else []
+        removed = candidates = 0
+        for item in strategies:
+            if not isinstance(item, dict):
+                continue
+            if isinstance(item.get('removed_count'), int) and not isinstance(item.get('removed_count'), bool):
+                removed += item['removed_count']
+            if isinstance(item.get('candidate_count'), int) and not isinstance(item.get('candidate_count'), bool):
+                candidates += item['candidate_count']
+        delta = record.get('observed_free_delta_bytes')
+        mode = record.get('mode')
+        status = record.get('status')
+        finished = record.get('finished_at')
+        history.append({
+            'finished_at': finished if isinstance(finished, str) and len(finished) <= 64 else None,
+            'mode': mode if mode in ('scan', 'plan', 'run', 'scheduled') else None,
+            'status': status if isinstance(status, str) and len(status) <= 24 else None,
+            'observed_free_delta_bytes': (int(delta) if isinstance(delta, int)
+                                         and not isinstance(delta, bool) else None),
+            'removed_count': removed,
+            'candidate_count': candidates,
+            'strategy_count': len([s for s in strategies if isinstance(s, dict)]),
+        })
+        if len(history) >= limit:
+            break
+    return {'thresholds': thresholds, 'history': history}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--storage-blobs', action='store_true', help=argparse.SUPPRESS)
@@ -841,6 +913,9 @@ def main():
     output = supplement(original, args.home, collect_live=True)
     output['database_samples'] = database_samples(original, args.history)
     output['directory_samples'] = directory_samples(output, args.history)
+    maintenance = maintenance_history()
+    if maintenance is not None:
+        output['maintenance'] = maintenance
     if 'storage_diagnostics' in output:
         storage_baseline(output['storage_diagnostics'], args.history, output.get('host', ''))
     current = json.loads(source.read_text())

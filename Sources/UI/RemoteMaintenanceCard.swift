@@ -3,14 +3,19 @@ import SwiftUI
 /// Manual server control is independent of whether Mac maintenance includes it.
 struct RemoteMaintenanceCard: View {
     @ObservedObject var maintain: MaintainStore
+    /// The server's published reading, for its own maintenance record.  The
+    /// card observes it directly so a fresh snapshot redraws the history even
+    /// when no manual run happened here.
+    @ObservedObject var vps: VPSStatusStore
     @StateObject private var control: ServerMaintenanceControl
     @State private var selected = Set(ServerMaintenanceStrategy.defaults)
     @State private var pending: PendingMaintenanceRequest?
     @State private var requestError: String?
 
     @MainActor
-    init(maintain: MaintainStore, control: ServerMaintenanceControl? = nil) {
+    init(maintain: MaintainStore, control: ServerMaintenanceControl? = nil, vps: VPSStatusStore? = nil) {
         self.maintain = maintain
+        _vps = ObservedObject(wrappedValue: vps ?? maintain.vpsStore)
         _control = StateObject(wrappedValue: control ?? ServerMaintenanceControl())
     }
 
@@ -76,6 +81,7 @@ struct RemoteMaintenanceCard: View {
                     Text("Available space also changes with other server activity; Docker requests do not prove physical bytes reclaimed.")
                         .foregroundStyle(.secondary)
                 }
+                if !host.isEmpty { serverHistory }
             }
             .font(.system(size: 11))
             .frame(maxWidth: .infinity, alignment: .leading).padding(4)
@@ -97,6 +103,46 @@ struct RemoteMaintenanceCard: View {
     private func startScan() {
         guard let request = makeRequest(.scan) else { return }
         Task { await control.perform(request) }
+    }
+
+    /// The server's own record, matching what the Mac's Maintenance tab shows
+    /// for this Mac: the schedule's gate and the last finished runs.  Counts
+    /// and measured bytes only; the audit never sends paths or names here.
+    @ViewBuilder private var serverHistory: some View {
+        if let maintenance = vps.snapshot?.maintenance {
+            if let thresholds = maintenance.thresholds {
+                Text("The server's own schedule wakes at \(Int(thresholds.usedPercentAtOrAbove))% used or \(HogFormat.memory(UInt64(max(0, thresholds.freeBytesAtOrBelow)))) free.")
+                    .foregroundStyle(.secondary)
+            }
+            let runs = maintenance.history ?? []
+            if runs.isEmpty {
+                Text("No finished server maintenance runs yet.").foregroundStyle(.secondary)
+            } else {
+                Text("Last Runs on the Server").font(.system(size: 11, weight: .semibold))
+                ForEach(Array(runs.prefix(5).enumerated()), id: \.offset) { _, run in
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(run.finishedAtDate.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Time unknown")
+                        Spacer()
+                        Text(historyDetail(run))
+                    }
+                    .foregroundStyle(.secondary)
+                }
+            }
+        } else {
+            Text("The server has not published its maintenance history yet.").foregroundStyle(.secondary)
+        }
+    }
+
+    private func historyDetail(_ run: VPSMaintenance.Run) -> String {
+        let mode = run.mode == "scheduled" ? "Scheduled" : "Run"
+        var parts = [mode, run.status.map { $0.prefix(1).uppercased() + $0.dropFirst() } ?? "Status unknown"]
+        if let delta = run.observedFreeDeltaBytes {
+            if delta > 0 { parts.append("\(HogFormat.memory(UInt64(max(0, delta)))) freed") }
+            else if delta < 0 { parts.append("space shrank") }
+        }
+        if let removed = run.removedCount, removed > 0 { parts.append("\(removed) removed") }
+        else if let candidates = run.candidateCount, candidates > 0 { parts.append("\(candidates) eligible") }
+        return parts.joined(separator: " · ")
     }
 
     private func signedBytes(_ bytes: Int64) -> String {

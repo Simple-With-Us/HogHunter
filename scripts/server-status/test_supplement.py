@@ -455,6 +455,69 @@ class SupplementTests(unittest.TestCase):
                     module.main()
             self.assertEqual(canonical.read_text(), '{"previous": true}\n')
 
+    def test_maintenance_history_reads_finished_records_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'audit.jsonl'
+            records = [
+                {'event': 'started', 'mode': 'run', 'strategies': ['package-cache']},
+                {'event': 'finished', 'mode': 'run', 'status': 'ran',
+                 'finished_at': '2026-11-25T10:00:00+00:00',
+                 'observed_free_delta_bytes': 123456,
+                 'thresholds': {'used_percent_at_or_above': 80, 'free_bytes_at_or_below': 25 * 1024**3},
+                 'strategies': [
+                     {'id': 'package-cache', 'candidate_count': 3, 'removed_count': 3},
+                     {'id': 'rotated-logs', 'candidate_count': 1, 'removed_count': 0},
+                 ]},
+                {'event': 'finished', 'mode': 'scheduled', 'status': 'skipped',
+                 'observed_free_delta_bytes': 0,
+                 'strategies': []},
+                'not json at all',
+                {'event': 'finished', 'mode': 'bogus', 'status': 'wrong-mode',
+                 'observed_free_delta_bytes': -5,
+                 'strategies': [{'id': 'package-cache', 'candidate_count': 'many',
+                                 'removed_count': True}]},
+            ]
+            path.write_text('\n'.join(json.dumps(r) if isinstance(r, dict) else r for r in records) + '\n')
+            value = module.maintenance_history(path)
+        self.assertEqual(value['thresholds'],
+                         {'used_percent_at_or_above': 80.0, 'free_bytes_at_or_below': 25 * 1024**3})
+        history = value['history']
+        self.assertEqual([row['mode'] for row in history], [None, 'scheduled', 'run'])
+        newest = history[-1]
+        self.assertEqual(newest['status'], 'ran')
+        self.assertEqual(newest['observed_free_delta_bytes'], 123456)
+        self.assertEqual(newest['removed_count'], 3)
+        self.assertEqual(newest['candidate_count'], 4)
+        self.assertEqual(newest['strategy_count'], 2)
+        self.assertEqual(history[0]['observed_free_delta_bytes'], -5, "signed, never dropped")
+        self.assertEqual(history[0]['removed_count'], 0)
+
+    def test_maintenance_history_limits_and_reports_unreadable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'audit.jsonl'
+            path.write_text(''.join(json.dumps({'event': 'finished', 'mode': 'run', 'status': 'ran',
+                                                'observed_free_delta_bytes': i, 'strategies': []}) + '\n'
+                                    for i in range(30)))
+            value = module.maintenance_history(path, limit=5)
+            self.assertEqual(len(value['history']), 5)
+            self.assertEqual(value['history'][0]['observed_free_delta_bytes'], 29)
+            self.assertIsNone(module.maintenance_history(Path(directory) / 'missing.jsonl'))
+
+    def test_maintenance_history_reads_only_the_log_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'audit.jsonl'
+            rows = []
+            for i in range(4000):
+                rows.append(json.dumps({'event': 'finished', 'mode': 'run', 'status': 'ran',
+                                        'observed_free_delta_bytes': i, 'strategies': []}))
+            path.write_text('\n'.join(rows) + '\n')
+            self.assertGreater(path.stat().st_size, 262144)
+            value = module.maintenance_history(path)
+        self.assertEqual(len(value['history']), 10)
+        self.assertIsNotNone(value['history'][0])
+        newest = value['history'][0]['observed_free_delta_bytes']
+        self.assertGreater(newest, value['history'][-1]['observed_free_delta_bytes'])
+
     def test_atomic_write(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'snapshot.json'

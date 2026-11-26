@@ -1298,6 +1298,73 @@ enum CompanionServerActionOutcome: Equatable, Sendable {
     }
 }
 
+/// The server's own maintenance record.  Counts and measured bytes only, so
+/// the phone never learns a path, an argument or a strategy name from it.
+struct CompanionServerMaintenance: Codable, Equatable, Sendable {
+    /// How many finished runs travel; the server keeps the same bound.
+    static let historyLimit = 10
+    /// The scheduled run wakes at or above this used percent...
+    var thresholdUsedPercent: Double? = nil
+    /// ...or at or below this free level.
+    var thresholdFreeBytes: Int64? = nil
+    var history: [CompanionServerMaintenanceRun]? = nil
+}
+
+/// One finished server maintenance run.
+struct CompanionServerMaintenanceRun: Codable, Equatable, Sendable {
+    var finishedAt: Date? = nil
+    var mode: String? = nil
+    var status: String? = nil
+    /// Signed measured free-space change; other activity can make it negative.
+    var observedFreeDeltaBytes: Int64? = nil
+    var removedCount: Int? = nil
+    var candidateCount: Int? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case finishedAt
+        case mode
+        case status
+        case observedFreeDeltaBytes
+        case reclaimedBytes
+        case removedCount
+        case candidateCount
+    }
+
+    init(finishedAt: Date? = nil, mode: String? = nil, status: String? = nil,
+         observedFreeDeltaBytes: Int64? = nil, removedCount: Int? = nil,
+         candidateCount: Int? = nil) {
+        self.finishedAt = finishedAt
+        self.mode = mode
+        self.status = status
+        self.observedFreeDeltaBytes = observedFreeDeltaBytes
+        self.removedCount = removedCount
+        self.candidateCount = candidateCount
+    }
+
+    /// A snapshot persisted while the figure was briefly named reclaimedBytes
+    /// keeps its value instead of arriving blank after an update.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        finishedAt = try container.decodeIfPresent(Date.self, forKey: .finishedAt)
+        mode = try container.decodeIfPresent(String.self, forKey: .mode)
+        status = try container.decodeIfPresent(String.self, forKey: .status)
+        observedFreeDeltaBytes = try container.decodeIfPresent(Int64.self, forKey: .observedFreeDeltaBytes)
+            ?? container.decodeIfPresent(Int64.self, forKey: .reclaimedBytes)
+        removedCount = try container.decodeIfPresent(Int.self, forKey: .removedCount)
+        candidateCount = try container.decodeIfPresent(Int.self, forKey: .candidateCount)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(finishedAt, forKey: .finishedAt)
+        try container.encodeIfPresent(mode, forKey: .mode)
+        try container.encodeIfPresent(status, forKey: .status)
+        try container.encodeIfPresent(observedFreeDeltaBytes, forKey: .observedFreeDeltaBytes)
+        try container.encodeIfPresent(removedCount, forKey: .removedCount)
+        try container.encodeIfPresent(candidateCount, forKey: .candidateCount)
+    }
+}
+
 /// What a server maintenance scan or run found, in the Mac card's words.
 struct CompanionServerMaintenanceSummary: Codable, Equatable, Sendable {
     var mode: String
@@ -1373,6 +1440,9 @@ struct CompanionServerStatus: Codable, Equatable, Sendable {
     var processes: [CompanionServerProcess]? = nil
     var processCount: Int? = nil
     var workloads: [CompanionServerWorkload]? = nil
+    /// The server's own maintenance record: the pressure gate its scheduled
+    /// run uses and the last finished runs, newest first.
+    var maintenance: CompanionServerMaintenance? = nil
 
     /// Whether anything in the block came from a reading.
     var hasReading: Bool { generatedAt != nil || cpu != nil || memory != nil || devices?.isEmpty == false }

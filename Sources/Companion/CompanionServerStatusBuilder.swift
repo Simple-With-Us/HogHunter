@@ -88,7 +88,27 @@ enum CompanionServerStatusBuilder {
             tools: snapshot.toolStatuses?.map(tool),
             processes: processes?.prefix(processLimit).map(process),
             processCount: processes?.count,
-            workloads: snapshot.coolify?.prefix(workloadLimit).map(workload)
+            workloads: snapshot.coolify?.prefix(workloadLimit).map(workload),
+            maintenance: snapshot.maintenance.map(maintenance)
+        )
+    }
+
+    /// The server's maintenance record, bounded exactly like the server's
+    /// own history so the phone and the Mac agree on what ended when.
+    static func maintenance(_ value: VPSMaintenance) -> CompanionServerMaintenance {
+        CompanionServerMaintenance(
+            thresholdUsedPercent: value.thresholds?.usedPercentAtOrAbove,
+            thresholdFreeBytes: value.thresholds?.freeBytesAtOrBelow,
+            history: (value.history ?? []).prefix(CompanionServerMaintenance.historyLimit).map { run in
+                CompanionServerMaintenanceRun(
+                    finishedAt: run.finishedAtDate,
+                    mode: run.mode,
+                    status: run.status,
+                    observedFreeDeltaBytes: run.observedFreeDeltaBytes,
+                    removedCount: run.removedCount,
+                    candidateCount: run.candidateCount
+                )
+            }
         )
     }
 
