@@ -1319,6 +1319,50 @@ struct CompanionServerMaintenanceRun: Codable, Equatable, Sendable {
     var observedFreeDeltaBytes: Int64? = nil
     var removedCount: Int? = nil
     var candidateCount: Int? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case finishedAt
+        case mode
+        case status
+        case observedFreeDeltaBytes
+        case reclaimedBytes
+        case removedCount
+        case candidateCount
+    }
+
+    init(finishedAt: Date? = nil, mode: String? = nil, status: String? = nil,
+         observedFreeDeltaBytes: Int64? = nil, removedCount: Int? = nil,
+         candidateCount: Int? = nil) {
+        self.finishedAt = finishedAt
+        self.mode = mode
+        self.status = status
+        self.observedFreeDeltaBytes = observedFreeDeltaBytes
+        self.removedCount = removedCount
+        self.candidateCount = candidateCount
+    }
+
+    /// A snapshot persisted while the figure was briefly named reclaimedBytes
+    /// keeps its value instead of arriving blank after an update.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        finishedAt = try container.decodeIfPresent(Date.self, forKey: .finishedAt)
+        mode = try container.decodeIfPresent(String.self, forKey: .mode)
+        status = try container.decodeIfPresent(String.self, forKey: .status)
+        observedFreeDeltaBytes = try container.decodeIfPresent(Int64.self, forKey: .observedFreeDeltaBytes)
+            ?? container.decodeIfPresent(Int64.self, forKey: .reclaimedBytes)
+        removedCount = try container.decodeIfPresent(Int.self, forKey: .removedCount)
+        candidateCount = try container.decodeIfPresent(Int.self, forKey: .candidateCount)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(finishedAt, forKey: .finishedAt)
+        try container.encodeIfPresent(mode, forKey: .mode)
+        try container.encodeIfPresent(status, forKey: .status)
+        try container.encodeIfPresent(observedFreeDeltaBytes, forKey: .observedFreeDeltaBytes)
+        try container.encodeIfPresent(removedCount, forKey: .removedCount)
+        try container.encodeIfPresent(candidateCount, forKey: .candidateCount)
+    }
 }
 
 /// What a server maintenance scan or run found, in the Mac card's words.
