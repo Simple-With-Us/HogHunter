@@ -1674,7 +1674,7 @@ struct DashboardView: View {
                     .font(.caption)
                 }
             } footer: {
-                Text("\(sortedAppStorageRows.count) apps on \(snapshot.hostName) (the Mac sends up to 40), sorted by \(appStorageSortOrder.rawValue.lowercased()).\u{00A0} Bundle is the .app; Hidden is everything else (Library/Caches, Containers, Group Containers, Saved State, etc.).\u{00A0} Running shows only apps the Mac saw open.\u{00A0} Open the Storage pane on the Mac for the full list and cleanup.")
+                Text("Showing \(sortedAppStorageRows.count) of the \(apps.count) apps the Mac sent, up to 40, sorted by \(appStorageSortOrder.rawValue.lowercased()).\u{00A0} Bundle is the .app; Hidden is everything else (Library/Caches, Containers, Group Containers, Saved State, etc.).\u{00A0} Running shows only apps the Mac saw open.\u{00A0} Open the Storage pane on the Mac for the full list and cleanup.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
