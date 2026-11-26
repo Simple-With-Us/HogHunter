@@ -111,14 +111,15 @@ struct RemoteMaintenanceCard: View {
     @ViewBuilder private var serverHistory: some View {
         if let maintenance = vps.snapshot?.maintenance {
             if let thresholds = maintenance.thresholds {
-                Text("The server's own schedule wakes at \(Int(thresholds.usedPercentAtOrAbove))% used or \(HogFormat.memory(UInt64(thresholds.freeBytesAtOrBelow))) free.")
+                Text("The server's own schedule wakes at \(Int(thresholds.usedPercentAtOrAbove))% used or \(HogFormat.memory(UInt64(max(0, thresholds.freeBytesAtOrBelow)))) free.")
                     .foregroundStyle(.secondary)
             }
-            if maintenance.history.isEmpty {
+            let runs = maintenance.history ?? []
+            if runs.isEmpty {
                 Text("No finished server maintenance runs yet.").foregroundStyle(.secondary)
             } else {
                 Text("Last Runs on the Server").font(.system(size: 11, weight: .semibold))
-                ForEach(Array(maintenance.history.prefix(5).enumerated()), id: \.offset) { _, run in
+                ForEach(Array(runs.prefix(5).enumerated()), id: \.offset) { _, run in
                     HStack(alignment: .firstTextBaseline) {
                         Text(run.finishedAtDate.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Time unknown")
                         Spacer()
@@ -136,7 +137,7 @@ struct RemoteMaintenanceCard: View {
         let mode = run.mode == "scheduled" ? "Scheduled" : "Run"
         var parts = [mode, run.status.map { $0.prefix(1).uppercased() + $0.dropFirst() } ?? "Status unknown"]
         if let delta = run.observedFreeDeltaBytes {
-            if delta > 0 { parts.append("\(HogFormat.memory(UInt64(delta))) freed") }
+            if delta > 0 { parts.append("\(HogFormat.memory(UInt64(max(0, delta)))) freed") }
             else if delta < 0 { parts.append("space shrank") }
         }
         if let removed = run.removedCount, removed > 0 { parts.append("\(removed) removed") }

@@ -619,5 +619,7 @@ struct VPSMaintenance: Codable, Equatable, Sendable {
     }
 
     let thresholds: Thresholds?
-    let history: [Run]
+    /// Optional so a maintenance object without the key (an older or partial
+    /// publisher) never discards the whole snapshot's readings.
+    let history: [Run]?
 }

@@ -99,7 +99,7 @@ enum CompanionServerStatusBuilder {
         CompanionServerMaintenance(
             thresholdUsedPercent: value.thresholds?.usedPercentAtOrAbove,
             thresholdFreeBytes: value.thresholds?.freeBytesAtOrBelow,
-            history: value.history.prefix(CompanionServerMaintenance.historyLimit).map { run in
+            history: (value.history ?? []).prefix(CompanionServerMaintenance.historyLimit).map { run in
                 CompanionServerMaintenanceRun(
                     finishedAt: run.finishedAtDate,
                     mode: run.mode,

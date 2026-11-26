@@ -182,8 +182,22 @@ final class CompanionServerStatusBuilderTests: XCTestCase {
         let reading = try JSONDecoder().decode(VPSStatusSnapshot.self, from: Data(json.utf8))
         XCTAssertEqual(reading.maintenance?.thresholds?.usedPercentAtOrAbove, 80)
         XCTAssertEqual(reading.maintenance?.thresholds?.freeBytesAtOrBelow, 26_843_545_600)
-        XCTAssertNotNil(reading.maintenance?.history.first?.finishedAtDate, "ISO with offset parses")
-        XCTAssertEqual(reading.maintenance?.history.first?.observedFreeDeltaBytes, 5)
+        XCTAssertNotNil(reading.maintenance?.history?.first?.finishedAtDate, "ISO with offset parses")
+        XCTAssertEqual(reading.maintenance?.history?.first?.observedFreeDeltaBytes, 5)
+    }
+
+    func testMaintenanceWithoutHistoryKeepsTheWholeSnapshot() throws {
+        // A maintenance object with no history key must never discard the
+        // reading: an older or partial publisher still decodes.
+        let json = """
+        {"generated_at":"2026-11-26T00:00:00Z","host":"h","devices":{},
+         "maintenance":{"thresholds":{"used_percent_at_or_above":80,"free_bytes_at_or_below":100}}}
+        """
+        let reading = try JSONDecoder().decode(VPSStatusSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(reading.maintenance?.thresholds?.usedPercentAtOrAbove, 80)
+        XCTAssertNil(reading.maintenance?.history)
+        let status = build(reading: reading)
+        XCTAssertEqual(status.maintenance?.history?.count, 0, "an absent history becomes empty, not a lost reading")
     }
 
     func testAnUnreadableTimeOrAClockFarAheadIsNotCurrent() {
