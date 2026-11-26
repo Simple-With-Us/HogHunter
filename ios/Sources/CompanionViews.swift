@@ -539,6 +539,8 @@ struct DashboardView: View {
     @State private var sortRequestGeneration: Int = 0
     @State private var networkSortOrder: CompanionNetworkSort = .connections
     @State private var appStorageSortOrder: CompanionAppStorageSort = .total
+    /// The Mac's All/Running filter, mirrored here.
+    @State private var appStorageShowsRunningOnly = false
     /// The Storage pane on screen.  Drives stays the default so the Mac's own
     /// disk usage keeps its place as the first storage a person sees.  The
     /// flags exist for the screenshot lane, which has to reach each pane.
@@ -774,13 +776,14 @@ struct DashboardView: View {
 
     private var sortedAppStorageRows: [CompanionAppStorageRow] {
         guard let apps = snapshot.storage?.topApps else { return [] }
+        let filtered = appStorageShowsRunningOnly ? apps.filter { $0.isRunning == true } : apps
         switch appStorageSortOrder {
         case .total:
-            return apps.sorted { $0.totalBytes > $1.totalBytes }
+            return filtered.sorted { $0.totalBytes > $1.totalBytes }
         case .hidden:
-            return apps.sorted { $0.hiddenBytes > $1.hiddenBytes }
+            return filtered.sorted { $0.hiddenBytes > $1.hiddenBytes }
         case .bundle:
-            return apps.sorted { $0.bundleBytes > $1.bundleBytes }
+            return filtered.sorted { $0.bundleBytes > $1.bundleBytes }
         }
     }
 
@@ -1631,6 +1634,13 @@ struct DashboardView: View {
                 ForEach(sortedAppStorageRows) { app in
                     macAppStorageRow(app)
                 }
+                if sortedAppStorageRows.isEmpty {
+                    Text(appStorageShowsRunningOnly
+                         ? "No running app is in the list from \(snapshot.hostName)."
+                         : "No apps are in the list from \(snapshot.hostName).")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 if let scanned = snapshot.storage?.topAppsScannedAt {
                     HStack {
                         Spacer()
@@ -1648,6 +1658,13 @@ struct DashboardView: View {
                             .font(.caption2)
                     }
                     Spacer()
+                    Picker("Apps", selection: $appStorageShowsRunningOnly) {
+                        Text("All").tag(false)
+                        Text("Running").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 132)
+                    .font(.caption)
                     Picker("Sort", selection: $appStorageSortOrder) {
                         ForEach(CompanionAppStorageSort.allCases) { sort in
                             Text(sort.rawValue).tag(sort)
@@ -1657,7 +1674,7 @@ struct DashboardView: View {
                     .font(.caption)
                 }
             } footer: {
-                Text("Top apps on \(snapshot.hostName), sorted by \(appStorageSortOrder.rawValue.lowercased()).\u{00A0} Bundle is the .app; Hidden is everything else (Library/Caches, Containers, Group Containers, Saved State, etc.).\u{00A0} Open the Storage pane on the Mac for the full list and cleanup.")
+                Text("The 40 largest apps on \(snapshot.hostName), sorted by \(appStorageSortOrder.rawValue.lowercased()).\u{00A0} Bundle is the .app; Hidden is everything else (Library/Caches, Containers, Group Containers, Saved State, etc.).\u{00A0} Running shows only apps the Mac saw open.\u{00A0} Open the Storage pane on the Mac for the full list and cleanup.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
