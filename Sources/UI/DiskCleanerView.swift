@@ -47,6 +47,7 @@ struct DiskCleanerView: View {
             }
         }
     }
+    @State private var showRegimenRunConfirmation = false
     /// The unattended clean regimen, as the owner set it.
     @State private var regimen = CleanRegimen.load()
     /// The one runner the app uses.  Observed so the summary and the next
@@ -114,6 +115,12 @@ struct DiskCleanerView: View {
         .onChange(of: store.state) { _ in refreshVolumeSpace() }
         .sheet(isPresented: $showExclusionsSheet) {
             CleanerExclusionsSheet(store: store)
+        }
+        .sheet(isPresented: $showRegimenRunConfirmation) {
+            RegimenRunConfirmationView {
+                showRegimenRunConfirmation = false
+                regimenRunner.runNow()
+            } cancel: { showRegimenRunConfirmation = false }
         }
         .confirmationDialog(
             "Confirm \(store.selectedTier.title)",
@@ -186,7 +193,7 @@ struct DiskCleanerView: View {
                     .labelsHidden()
 
                     Button {
-                        regimenRunner.runNow()
+                        showRegimenRunConfirmation = true
                     } label: {
                         Label("Run Now", systemImage: "play.circle")
                             .font(.system(size: 11))
@@ -243,21 +250,9 @@ struct DiskCleanerView: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
 
-                if let next = regimenRunner.nextRunDate {
-                    Text("Next run \(next.formatted(date: .abbreviated, time: .shortened))")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-                if let waiting = regimenRunner.waitingReason {
-                    Text(waiting)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-                if let summary = regimenRunner.lastSummary {
-                    Text(summary)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
+                Text(regimenRunner.statusLine)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
             } else {
                 Text("Off.\u{00A0} Hog Hunter never deletes anything on its own until this is turned on.")
                     .font(.system(size: 10))
@@ -560,11 +555,21 @@ struct DiskCleanerView: View {
                 }
             }
             .padding(.vertical, 2)
+        } else if store.state == .idle && !(autoScanOnAppear && isTabActive) {
+            // Manual-scan mode before the first scan: the header's idle case
+            // says "Ready to scan", and this names the empty list.  Auto-scan
+            // owns the idle moment otherwise, so the empty never flashes
+            // between appear and the scan starting.
+            Text("No results yet.\u{00A0} Press Scan to look for clutter.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 12)
         }
-        // No report and no placeholder.  The header's `.scanning` case owns
-        // progress now: it used to render a spinner here as well, and both
-        // were on screen for the whole scan.  The body only has to decide
-        // whether there are results to show.
+        // No report and no placeholder otherwise.  The header's `.scanning`
+        // case owns progress now: it used to render a spinner here as well,
+        // and both were on screen for the whole scan.  The body only has to
+        // decide whether there are results to show.
     }
 
     // MARK: - Bottom Bar

@@ -113,6 +113,8 @@ targets:
       - path: ios/Sources/CompanionKeychain.swift
       # Foundation-only: which rows each Server tab section shows.
       - path: ios/Sources/CompanionServerSection.swift
+      # Foundation-only: dashboard freshness and 429 countdown maths.
+      - path: ios/Sources/CompanionFreshness.swift
     dependencies:
       - target: HogHunter
     settings:

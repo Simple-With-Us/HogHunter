@@ -91,12 +91,25 @@ struct VPSStatusStripView: View {
                 Text("Stale · \(snapshot.relativeTimeString())")
                     .font(.system(size: 10))
                     .foregroundStyle(.orange)
+                    .help(staleReason)
+                    .accessibilityValue(staleReason)
             } else {
                 Text(snapshot.relativeTimeString())
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
             }
         }
+    }
+
+    /// Why the on-screen reading is stale, for the tooltip and screen
+    /// readers.  The body stays generic: a refresh failure is raw SSH text
+    /// and can name host internals, so only its first line travels here.
+    private var staleReason: String {
+        if let line = store.errorMessage?.split(whereSeparator: \.isNewline)
+            .map({ $0.trimmingCharacters(in: .whitespaces) }).first(where: { !$0.isEmpty }) {
+            return "Refresh Failed.\u{00A0}\(line)"
+        }
+        return "Refresh overdue.\u{00A0} Showing the last successful reading."
     }
 
     /// What a screen reader says.  The numbers are in the label, not only in
@@ -167,13 +180,17 @@ struct ServerStatusView: View {
     /// Which part of the server snapshot this view shows, so each section of
     /// the server scope answers with its own readings.
     var section: VPSResourceSection = .all
+    /// The store's shared controls, forwarded to the card.  Nil keeps the
+    /// card's own instances, for callers outside the panel.
+    var control: ServerControl? = nil
+    var maintenance: ServerMaintenanceControl? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Remote Server")
                 .font(.system(size: 13, weight: .semibold))
 
-            VPSResourceCardView(store: store, section: section)
+            VPSResourceCardView(store: store, section: section, control: control, maintenance: maintenance)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .fixedSize(horizontal: false, vertical: true)

@@ -202,6 +202,10 @@ final class DiskCleanerStore: ObservableObject {
     func setTier(_ tier: CleanTier) {
         guard tier != selectedTier else { return }
         selectedTier = tier
+        // A tier switch voids any Extreme acknowledgement: returning to
+        // Extreme must ask again, so a stale ack cannot authorise a later
+        // destructive scan/clean it was never shown for.
+        acknowledgedExtremeDisclaimer = false
         if manualScanOnly { discardResults() } else { scan() }
     }
 

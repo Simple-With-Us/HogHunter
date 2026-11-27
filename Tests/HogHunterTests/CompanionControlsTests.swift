@@ -322,6 +322,37 @@ final class RemoteTameStatusTests: XCTestCase {
         XCTAssertEqual(decoded.acted, 0)
         XCTAssertEqual(decoded.skipped, 1)
     }
+
+    func testAnUnknownTameActionIsRejectedAndNeverFallsThroughToUntame() throws {
+        let target = CompanionTarget(rowId: "p-1-1", name: "launchd", members: [ProcessKey(pid: 1, startTime: 1)])
+        let suite = "hoghunter.tests.tamewhitelist.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = HogStore(defaults: defaults)
+        for bad in ["", "kill", "tamed", "restore"] {
+            let reply = store.performRemoteTame(target: target, action: bad)
+            XCTAssertEqual(reply.status, 400, "action \(bad.debugDescription) must be rejected")
+            let decoded = try JSONDecoder().decode(CompanionTameResponse.self, from: reply.body)
+            XCTAssertEqual(decoded.status, "rejected")
+            XCTAssertEqual(decoded.acted, 0)
+            XCTAssertFalse(decoded.isTamed)
+        }
+        // Case/whitespace variants of the two allowed actions still reach
+        // the live check (changed pid -> 400 changed, not rejected).
+        let allowed = store.performRemoteTame(target: target, action: " Untame ")
+        XCTAssertEqual(allowed.status, 400)
+        XCTAssertEqual(try JSONDecoder().decode(CompanionTameResponse.self, from: allowed.body).status, "changed")
+    }
+
+    @MainActor
+    func testAppearanceDefaultsToLightWhenNothingIsStored() {
+        let suite = "hoghunter.tests.appearance.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(HogStore(defaults: defaults).appearance, .light)
+        defaults.set(AppearanceChoice.dark.rawValue, forKey: HogStore.Key.appearance)
+        XCTAssertEqual(HogStore(defaults: defaults).appearance, .dark, "a stored choice still wins")
+    }
 }
 
 // MARK: - The names the phone sends

@@ -5,10 +5,17 @@ struct ServerProcessActions: View {
     let process: VPSProcess
     let host: String
     @ObservedObject var control: ServerControl
+    /// The shared maintenance control, so the menu stays disabled while a
+    /// server maintenance run holds the server.  Defaults to a fresh one,
+    /// which is never working, for previews.
+    @ObservedObject var maintenance: ServerMaintenanceControl = ServerMaintenanceControl()
     var showsStopButton = false
     var didAct: () -> Void = {}
     @State private var pending: PendingAction?
     @State private var sampleText: String?
+
+    /// Either shared control working refuses a new action.
+    private var busy: Bool { control.isWorking || maintenance.isWorking }
 
     private enum Action: String, Identifiable {
         case quit, forceQuit, tame, untame
@@ -34,7 +41,7 @@ struct ServerProcessActions: View {
                 Button("Stop…") { pending = PendingAction(action: .quit, process: process) }
                     .buttonStyle(.bordered)
                     .controlSize(.mini)
-                    .disabled(control.isWorking || !process.can(action: "quit"))
+                    .disabled(busy || !process.can(action: "quit"))
                     .help(process.protectionReason ?? "Ask this server process to quit after confirmation")
                     .accessibilityLabel("Stop \(process.name) on server")
             }
@@ -48,8 +55,7 @@ struct ServerProcessActions: View {
             Button("Force Quit…", role: .destructive) { pending = PendingAction(action: .forceQuit, process: process) }
                 .disabled(!process.can(action: "force-quit"))
             Divider()
-            Button("Tame…") { pending = PendingAction(action: .tame, process: process) }.disabled(!process.can(action: "tame"))
-            Button("Restore Priority…") { pending = PendingAction(action: .untame, process: process) }.disabled(!process.can(action: "untame"))
+            tameButtons
             Button("Sample For 3 Seconds") {
                 Task {
                     await control.sample(process: process, host: host)
@@ -62,7 +68,7 @@ struct ServerProcessActions: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .disabled(control.isWorking || process.allowedActions?.isEmpty != false)
+        .disabled(busy || process.allowedActions?.isEmpty != false)
         .help(process.protectionReason ?? "Actions for \(process.name) on the server")
         .confirmationDialog(
             "\(pending?.action.title ?? "Change") \(pending?.process.name ?? process.name) On Server?",
@@ -112,14 +118,44 @@ struct ServerProcessActions: View {
             }.padding().frame(minWidth: 560, minHeight: 380)
         }
     }
+
+    /// The tame choice for what the Mac knows: a tamed process offers only
+    /// the restore, an untamed one only the tame, and an unknown priority
+    /// offers both rather than guessing.  The phone's builder applies the
+    /// same rule to the actions it sends.
+    @ViewBuilder
+    private var tameButtons: some View {
+        switch process.tameState {
+        case .tamed:
+            Button("Restore Priority…") { pending = PendingAction(action: .untame, process: process) }
+                .disabled(!process.can(action: "untame"))
+        case .untamed:
+            Button("Tame…") { pending = PendingAction(action: .tame, process: process) }
+                .disabled(!process.can(action: "tame"))
+        case .unknown:
+            Button("Tame…") { pending = PendingAction(action: .tame, process: process) }
+                .disabled(!process.can(action: "tame"))
+                .help("Priority Unknown.\u{00A0} The server did not report a priority for this process.")
+            Button("Restore Priority…") { pending = PendingAction(action: .untame, process: process) }
+                .disabled(!process.can(action: "untame"))
+                .help("Priority Unknown.\u{00A0} The server did not report a priority for this process.")
+        }
+    }
 }
 
 struct ServerWorkloadActions: View {
     let resource: VPSCoolifyResource
     let host: String
     @ObservedObject var control: ServerControl
+    /// The shared maintenance control, so the menu stays disabled while a
+    /// server maintenance run holds the server.  Defaults to a fresh one,
+    /// which is never working, for previews.
+    @ObservedObject var maintenance: ServerMaintenanceControl = ServerMaintenanceControl()
     var didAct: () -> Void = {}
     @State private var pending: PendingAction?
+
+    /// Either shared control working refuses a new action.
+    private var busy: Bool { control.isWorking || maintenance.isWorking }
 
     private struct PendingAction {
         let title: String
@@ -135,7 +171,7 @@ struct ServerWorkloadActions: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .disabled(control.isWorking || resource.allowedActions?.isEmpty != false)
+        .disabled(busy || resource.allowedActions?.isEmpty != false)
         .help(resource.protectionReason ?? "Actions for \(resource.name) on the server")
         .confirmationDialog(
             "\(pending?.title ?? "Change") \(pending?.resource.name ?? resource.name) On Server?",
@@ -159,6 +195,19 @@ struct ServerWorkloadActions: View {
             Button("Cancel", role: .cancel) { pending = nil }
         } message: {
             Text("This interrupts the server workload and may lose unsaved work.\u{00A0} Coolify may restart workloads it is configured to keep alive; changed or protected containers are refused.")
+        }
+    }
+}
+
+/// The shared control's latest outcome, in its own view so a panel that
+/// shows it stays subscribed without owning the control.
+struct ServerControlOutcomeView: View {
+    @ObservedObject var control: ServerControl
+    var font: Font = .system(size: 9)
+
+    var body: some View {
+        if let outcome = control.lastOutcome {
+            Text(outcome.message).font(font).foregroundStyle(.secondary)
         }
     }
 }

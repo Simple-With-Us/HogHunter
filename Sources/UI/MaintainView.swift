@@ -44,6 +44,7 @@ struct MaintainView: View {
     /// scan spinners: two render paths answering one question.  The header is
     /// what pushed the cards out of the panel, so it stays, minus the words.
     @State private var expandedStepIds: Set<String> = []
+    @State private var showRunConfirmation = false
 
     private var header: some View {
         HStack {
@@ -57,8 +58,27 @@ struct MaintainView: View {
             .foregroundStyle(Color.accentColor)
 
             Spacer()
-            Button("Run Now") { store.runNow("full") }
+            Button("Run Now") { showRunConfirmation = true }
                 .disabled(store.isRunningNow)
+        }
+        .sheet(isPresented: $showRunConfirmation) {
+            MaintainRunConfirmationView {
+                showRunConfirmation = false
+                store.runNow("full")
+            } cancel: { showRunConfirmation = false }
+        }
+    }
+
+    private var reachability: MaintainReachability {
+        MaintainStatus.reachability(status: store.status, isRunning: store.isRunningNow, now: Date())
+    }
+
+    private var statusHeadline: String {
+        switch reachability {
+        // The engine's health word is a pinned snapshot contract in sentence
+        // case; the Mac headline is chrome, so it renders Title Case here.
+        case .ready: return store.status?.displayHealth.capitalized ?? MaintainReachability.ready.title
+        default: return reachability.title
         }
     }
 
@@ -68,12 +88,22 @@ struct MaintainView: View {
                 HStack {
                     Image(systemName: healthIcon)
                         .foregroundStyle(healthColor)
-                    Text(store.status?.displayHealth ?? "Waiting for first run")
+                    Text(statusHeadline)
                         .font(.system(size: 14, weight: .semibold))
                     Spacer()
                     if store.isRunningNow {
                         ProgressView().controlSize(.small)
                     }
+                }
+                if !reachability.detail.isEmpty {
+                    Text(reachability.detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                if store.isRunningNow {
+                    Text("Running Now…")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
                 }
                 if let status = store.status {
                     if let free = status.disk?.freeText {
@@ -82,6 +112,9 @@ struct MaintainView: View {
                     gridRow("Last full clean", formatDate(status.lastRunAt?["full"]))
                     gridRow("Next full clean", formatNext(status.nextRunAt["full"]))
                     gridRow("Background job", status.launchdLoaded ? "Loaded" : "Not loaded")
+                    if let updated = status.updatedAt, updated > 0 {
+                        gridRow("Status Updated", formatDate(updated))
+                    }
                 }
                 if let err = store.lastError {
                     Text(err)
@@ -95,10 +128,14 @@ struct MaintainView: View {
     }
 
     /// A persisted checkpoint can survive a killed process, so it is not a running indicator.
+    /// The store's live flag is: while a run is going the checkpoint reads as
+    /// its progress, and only once nothing is running does it read as orphaned.
     private func incompleteRunCard(_ run: MaintainRun) -> some View {
-        GroupBox("Incomplete Run") {
+        GroupBox(store.isRunningNow ? "Run in Progress" : "Incomplete Run") {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Last saved progress.\u{00A0} This run has not recorded completion; it may still be running or may have stopped.")
+                Text(store.isRunningNow
+                    ? "Running now.\u{00A0} This is the live checkpoint of the run in progress."
+                    : "Last saved progress.\u{00A0} This run has not recorded completion; it may still be running or may have stopped.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 gridRow("Run ID", run.runId)
@@ -185,6 +222,8 @@ struct MaintainView: View {
             }
             .buttonStyle(.plain)
             .help(entry.tooltip.isEmpty ? entry.title : entry.tooltip)
+            .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+            .accessibilityHint(isExpanded ? "Hides this step's details." : "Shows this step's details.")
 
             HStack(spacing: 8) {
                 Text(history.lastRunDate != nil ? "Last run \(formatDate(history.lastRunDate))" : "Not run yet")
@@ -251,6 +290,7 @@ struct MaintainView: View {
                     .frame(height: 5)
                     .frame(maxWidth: .infinity)
                     .help("No runs in past 24 hours")
+                    .accessibilityLabel("No runs in past 24 hours")
             } else {
                 ForEach(displayOutcomes) { sample in
                     RoundedRectangle(cornerRadius: 2)
@@ -258,6 +298,7 @@ struct MaintainView: View {
                         .frame(height: 6)
                         .frame(maxWidth: .infinity)
                         .help("\(formatDate(sample.timestamp)): \(sample.status.capitalized) — \(sample.reason)")
+                        .accessibilityLabel("\(formatDate(sample.timestamp)): \(sample.status.capitalized) — \(sample.reason)")
                 }
             }
         }

@@ -436,7 +436,7 @@ struct CompanionSettingsSummary: Codable, Equatable, Sendable {
     /// True when macOS has refused Hog Hunter permission to notify.
     var notificationsDenied: Bool? = nil
     /// The Mac's appearance: "System", "Light" or "Dark".
-    var appearance: String = "System"
+    var appearance: String = "Light"
     /// The refresh cadence the Mac uses while its panel is closed, in seconds.
     var backgroundRefreshInterval: Double = 10
     /// What the Mac's menu bar shows: "History Bars & %", "Machine CPU", "Top Hog" or
@@ -471,7 +471,7 @@ extension CompanionSettingsSummary {
         webhookHost = try container.decodeIfPresent(String.self, forKey: .webhookHost)
         webhookStatus = try container.decodeIfPresent(String.self, forKey: .webhookStatus)
         notificationsDenied = try container.decodeIfPresent(Bool.self, forKey: .notificationsDenied)
-        appearance = try container.decodeIfPresent(String.self, forKey: .appearance) ?? "System"
+        appearance = try container.decodeIfPresent(String.self, forKey: .appearance) ?? "Light"
         backgroundRefreshInterval = try container.decodeIfPresent(Double.self, forKey: .backgroundRefreshInterval) ?? 10
         menuBarLabelMode = try container.decodeIfPresent(String.self, forKey: .menuBarLabelMode) ?? "History Bars & %"
         sort = try container.decodeIfPresent(String.self, forKey: .sort) ?? "CPU"
@@ -1687,7 +1687,9 @@ struct CompanionServerRefreshResponse: Codable, Equatable, Sendable {
         case 404:
             return CompanionServerRefreshResponse(status: "rejected", error: "This Mac's copy of Hog Hunter is older than this app and cannot refresh the server from iPhone.\u{00A0} Update it on the Mac.")
         case 429:
-            return CompanionServerRefreshResponse(status: "throttled", error: "The server was just refreshed.\u{00A0} Wait a moment, then try again.")
+            // A numberless 429 still means "wait the interval", so the phone
+            // gets the full one and its countdown runs.
+            return CompanionServerRefreshResponse(status: "throttled", error: "The server was just refreshed.\u{00A0} Wait a moment, then try again.", retryAfter: Int(CompanionServerRefresh.minimumInterval))
         default:
             return CompanionServerRefreshResponse(status: "rejected", error: "The Mac did not refresh the server.")
         }

@@ -205,6 +205,7 @@ struct StatusChip: View {
 
 struct CompanionRootView: View {
     @Bindable var model: CompanionModel
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack {
@@ -236,6 +237,13 @@ struct CompanionRootView: View {
                 }
         }
         .onAppear { model.start() }
+        .onChange(of: scenePhase) { _, phase in
+            // Returning to the foreground re-polls at once, so the age on
+            // screen is not the age when the app was last left.
+            if phase == .active, case .live = model.phase {
+                Task { await model.refresh() }
+            }
+        }
         .alert("Forget \(model.saved?.name ?? "This Mac")?", isPresented: $model.showForgetConfirm) {
             Button("Forget Mac", role: .destructive) { model.forget() }
             Button("Cancel", role: .cancel) {}
@@ -476,16 +484,18 @@ private struct CodeEntryView: View {
                         .foregroundStyle(.secondary)
                 }
                 Section {
-                    Button {
-                        Task { await model.requestApproval() }
-                    } label: {
-                        HStack {
-                            Label(model.isWaitingForApproval ? "Check Your Mac and Click Allow" : "Ask Mac to Approve Instead", systemImage: "desktopcomputer")
-                            Spacer()
-                            if model.isWaitingForApproval { ProgressView() }
+                    TimelineView(.periodic(from: Date(), by: 1)) { context in
+                        Button {
+                            Task { await model.requestApproval() }
+                        } label: {
+                            HStack {
+                                Label(model.isWaitingForApproval ? "Check Your Mac and Click Allow" : "Ask Mac to Approve Instead", systemImage: "desktopcomputer")
+                                Spacer()
+                                if model.isWaitingForApproval { ProgressView() }
+                            }
                         }
+                        .disabled(model.isWaitingForApproval || model.isSubmittingCode || model.codeRetryRemaining(now: context.date) > 0)
                     }
-                    .disabled(model.isWaitingForApproval || model.isSubmittingCode)
                 } footer: {
                     Text("No code needed.\u{00A0} Your Mac shows an alert where you allow this iPhone and choose whether it can quit apps or run the disk cleaner.\u{00A0} Quit, tame, and clean work only on the same network or over Tailscale.")
                 }
@@ -493,6 +503,20 @@ private struct CodeEntryView: View {
                     Section {
                         Text(codeError)
                             .foregroundStyle(.red)
+                    }
+                }
+                TimelineView(.periodic(from: Date(), by: 1)) { context in
+                    if let countdown = CompanionFreshness.countdownText(remainingSeconds: model.codeRetryRemaining(now: context.date)) {
+                        Section {
+                            Label(countdown, systemImage: "clock")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                if model.isSubmittingCode {
+                    Section {
+                        HStack { ProgressView(); Text("Pairing…").font(.footnote).foregroundStyle(.secondary) }
                     }
                 }
             }
@@ -503,8 +527,10 @@ private struct CodeEntryView: View {
                     Button("Cancel") { model.cancelCode() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Pair") { Task { await model.submitCode() } }
-                        .disabled(model.isSubmittingCode)
+                    TimelineView(.periodic(from: Date(), by: 1)) { context in
+                        Button("Pair") { Task { await model.submitCode() } }
+                            .disabled(model.isSubmittingCode || model.codeRetryRemaining(now: context.date) > 0)
+                    }
                 }
             }
             .onAppear { focused = true }
@@ -829,11 +855,12 @@ struct DashboardView: View {
                     .padding(.top, 6)
                 Picker("Tab", selection: $selectedTab) {
                     ForEach(CompanionTab.allCases) { tab in
-                        // Six named segments do not fit a phone, so the picker
-                        // carries the Mac's own icons; the names stay as the
-                        // accessibility labels (HH-212).
-                        Image(systemName: tab.symbol)
-                            .accessibilityLabel(tab.rawValue)
+                        // Labelled tabs: icon plus visible name, so the
+                        // picker is not icon-only (HH-212 names retained
+                        // for VoiceOver via the label text).
+                        Label(tab.rawValue, systemImage: tab.symbol)
+                            .labelStyle(.titleAndIcon)
+                            .font(.caption2)
                             .tag(tab)
                     }
                 }
@@ -897,7 +924,7 @@ struct DashboardView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will safely trigger a Standard Clean on \(snapshot.hostName). An APFS local snapshot will be taken first, and deleted items are moved to Trash.")
+            Text("This will safely trigger a Standard Clean on \(snapshot.hostName).\u{00A0} An APFS local snapshot will be taken first, and deleted items are moved to Trash.")
         }
         .confirmationDialog(
             "\(isForceQuit ? "Force Quit" : "Quit") \(pendingQuitRow?.name ?? "App")?",
@@ -1075,6 +1102,18 @@ struct DashboardView: View {
                     Text("\(snapshot.window) · \(snapshot.grouping) · \(snapshot.cpuScale)")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                    TimelineView(.periodic(from: Date(), by: 1)) { context in
+                        Text(CompanionFreshness.freshnessText(sampledAt: snapshot.sampledAt, lastSuccessfulRefresh: model.lastSuccessfulRefresh, now: context.date))
+                            .font(.caption)
+                            .foregroundStyle(CompanionFreshness.state(sampledAt: snapshot.sampledAt, lastSuccessfulRefresh: model.lastSuccessfulRefresh, now: context.date) == .live ? Color.secondary : Color.orange)
+                            .accessibilityLabel(CompanionFreshness.freshnessText(sampledAt: snapshot.sampledAt, lastSuccessfulRefresh: model.lastSuccessfulRefresh, now: context.date))
+                        if let wait = CompanionFreshness.countdownText(remainingSeconds: model.snapshotRetryRemaining(now: context.date)) {
+                            Text(wait)
+                                .font(.caption)
+                                .foregroundStyle(Color.orange)
+                                .accessibilityLabel(wait)
+                        }
+                    }
                 }
                 Spacer()
                 if model.saved?.remoteHost != nil {
@@ -1228,7 +1267,7 @@ struct DashboardView: View {
         case .error:
             return server.errorText ?? "The last read failed."
         case .stale:
-            return "This reading is stale.\u{00A0}The Server tab has what the Mac last saw."
+            return "This reading is stale.\u{00A0} The Server tab has what the Mac last saw."
         case .ok:
             let parts = [server.headline?.cpuText, server.headline?.memoryText, server.headline?.diskText].compactMap { $0 }
             return parts.isEmpty ? "Readings are on the Server tab." : parts.joined(separator: " · ")
@@ -1942,7 +1981,7 @@ struct DashboardView: View {
             Section("Custom Excluded Folders") {
                 let paths = storage.excludedPaths ?? []
                 if paths.isEmpty {
-                    Text("No custom folders excluded. Tap below to protect specific folders from cleaning.")
+                    Text("No custom folders excluded.\u{00A0} Tap below to protect specific folders from cleaning.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else {
@@ -2125,7 +2164,7 @@ struct DashboardView: View {
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(app.isHiddenHeavy ? .red : .secondary)
                 if app.anyApproximate {
-                    Text("approx")
+                    Text("Approx.")
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(.orange)
                 }

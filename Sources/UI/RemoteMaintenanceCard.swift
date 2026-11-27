@@ -8,19 +8,23 @@ struct RemoteMaintenanceCard: View {
     /// when no manual run happened here.
     @ObservedObject var vps: VPSStatusStore
     @StateObject private var control: ServerMaintenanceControl
+    /// The shared process/workload control, so the card stays disabled
+    /// while a server action from any surface runs.
+    @ObservedObject var serverControl: ServerControl
     @State private var selected = Set(ServerMaintenanceStrategy.defaults)
     @State private var pending: PendingMaintenanceRequest?
     @State private var requestError: String?
 
     @MainActor
-    init(maintain: MaintainStore, control: ServerMaintenanceControl? = nil, vps: VPSStatusStore? = nil) {
+    init(maintain: MaintainStore, control: ServerMaintenanceControl? = nil, vps: VPSStatusStore? = nil, serverControl: ServerControl? = nil) {
         self.maintain = maintain
         _vps = ObservedObject(wrappedValue: vps ?? maintain.vpsStore)
         _control = StateObject(wrappedValue: control ?? ServerMaintenanceControl())
+        _serverControl = ObservedObject(wrappedValue: serverControl ?? ServerControl())
     }
 
     private var host: String { maintain.coolifyHost.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var busy: Bool { control.isWorking || maintain.isRunningNow }
+    private var busy: Bool { control.isWorking || serverControl.isWorking || maintain.isRunningNow }
 
     var body: some View {
         GroupBox {

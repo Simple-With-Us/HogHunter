@@ -43,6 +43,15 @@ final class CleanRegimenRunner: ObservableObject {
 
     @Published private(set) var isRunning = false
     @Published private(set) var lastRun: RegimenRun?
+    /// Bounded in-memory history of finished runs, newest first, so a wait
+    /// or a partial run can be explained after `lastSummary` moves on.
+    /// In-memory only: nothing here widens what is persisted or reported.
+    @Published private(set) var recentRuns: [RegimenRun] = []
+    nonisolated static let recentRunsCap = 10
+    /// How many finished runs the persisted trail keeps.  The same 20 the
+    /// Maintain list uses (`CompanionMaintain.maxRecentRuns`), so the two
+    /// trails answer "recent" the same way.
+    nonisolated static let persistedRunsCap = 20
     @Published private(set) var nextRunDate: Date?
     @Published private(set) var lastError: String?
 
@@ -80,6 +89,10 @@ final class CleanRegimenRunner: ObservableObject {
     /// clock: a run that tripped the gate did not happen, and the two states
     /// have to be told apart.
     private let gateFailureKey = "hoghunter.cleaner.regimen.lastGateFailureAt"
+    /// The persisted run trail: a JSON array of the newest finished runs.
+    /// Additive beside the clock keys above, in the app-group suite, so an
+    /// older build that never heard of it keeps working untouched.
+    private let persistedRunsKey = "hoghunter.cleaner.regimen.recentRuns"
 
     /// How long a failed safety gate backs off before the runner tries
     /// again.
@@ -118,6 +131,18 @@ final class CleanRegimenRunner: ObservableObject {
     /// Clock seam so tests do not have to wait a day.
     private let now: () -> Date
     private let lastRunDefaults: UserDefaults
+
+    /// Where the persisted run trail lives: the app-group suite `CleanRegimen`
+    /// already uses, so the trail sits beside the schedule it ran under.
+    /// Tests inject their own suite; without one, persistence stays off under
+    /// XCTest so a test run never writes the owner's suite.
+    private let historyDefaults: UserDefaults
+    private let persistHistory: Bool
+
+    /// The cleanup log an unattended run appends to when it removed
+    /// something.  Injected so a test can hand it an in-memory store; without
+    /// one, the app's log is used, and nothing under XCTest.
+    private let cleanupHistory: CleanupHistoryStore?
 
     /// Where the runner's lock comes from.
     ///
@@ -165,10 +190,20 @@ final class CleanRegimenRunner: ObservableObject {
         idleSeconds: @escaping () -> TimeInterval = { CleanRegimenRunner.systemIdleSeconds() },
         scanProvider: ((CleanerExclusions) async -> CleanScanReport)? = nil,
         exclusionsProvider: @escaping () -> CleanerExclusions = { CleanerExclusions.load() },
-        cleanProvider: (([CleanItem], CleanerExclusions, Bool) async -> CleanResult)? = nil
+        cleanProvider: (([CleanItem], CleanerExclusions, Bool) async -> CleanResult)? = nil,
+        historyDefaults: UserDefaults? = nil,
+        cleanupHistory: CleanupHistoryStore? = nil
     ) {
         self.now = now
         self.lastRunDefaults = defaults
+        if let historyDefaults {
+            self.historyDefaults = historyDefaults
+            self.persistHistory = true
+        } else {
+            self.historyDefaults = UserDefaults(suiteName: "group.com.simplewithus.hoghunter") ?? .standard
+            self.persistHistory = !Self.isRunningUnderTest
+        }
+        self.cleanupHistory = cleanupHistory ?? (Self.isRunningUnderTest ? nil : CleanupHistoryStore(inMemory: false))
         self.lockProvider = lockProvider
         self.idleSeconds = idleSeconds
         self.exclusionsProvider = exclusionsProvider
@@ -255,8 +290,48 @@ final class CleanRegimenRunner: ObservableObject {
     }
 
     /// When the runner may try the gate again.
-    private var gateRetryDate: Date? {
+    var gateRetryDate: Date? {
         gateFailureAt.map { $0.addingTimeInterval(Self.gateBackoff) }
+    }
+
+    /// The one status line the panel shows: running, gate retry time,
+    /// waiting reason, last summary with next run, or next run alone.
+    var statusLine: String {
+        Self.regimenStatusLine(
+            isRunning: isRunning,
+            lastSummary: lastSummary,
+            waitingReason: waitingReason,
+            nextRunDate: nextRunDate,
+            gateRetryDate: gateRetryDate,
+            now: now()
+        )
+    }
+
+    nonisolated static func regimenStatusLine(
+        isRunning: Bool,
+        lastSummary: String?,
+        waitingReason: String?,
+        nextRunDate: Date?,
+        gateRetryDate: Date?,
+        now: Date,
+        formatDateTime: (Date) -> String = { date in
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .short
+            return formatter.string(from: date)
+        }
+    ) -> String {
+        if isRunning { return "Running now." }
+        if let retry = gateRetryDate, retry > now {
+            return "The last run could not take a safety snapshot, so it will try again at \(formatDateTime(retry))."
+        }
+        if let waitingReason { return waitingReason }
+        if let lastSummary, let nextRunDate {
+            return "\(lastSummary)\u{00A0} Next run \(formatDateTime(nextRunDate))."
+        }
+        if let nextRunDate { return "Next run \(formatDateTime(nextRunDate))." }
+        if let lastSummary { return lastSummary }
+        return "Scheduled."
     }
 
     /// One look at the clock: start a scheduled run if one is due and nothing
@@ -447,6 +522,14 @@ final class CleanRegimenRunner: ObservableObject {
         return "The cleanup snapshot could not be created, so the regimen did not run."
     }
 
+    /// True inside an XCTest run.  Without an injected suite or history store,
+    /// a test run neither persists the run trail nor appends the cleanup log,
+    /// so the owner's suite and log stay clean.  Mirrors `MaintainStore`.
+    nonisolated static var isRunningUnderTest: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+    }
+
     /// Seconds since the last keyboard, mouse or trackpad event in this login
     /// session.
     nonisolated static func systemIdleSeconds() -> TimeInterval {
@@ -525,22 +608,25 @@ final class CleanRegimenRunner: ObservableObject {
         }
         isRunning = true
         lastError = nil
-        Self.log.info("run started (scheduled=\(scheduled, privacy: .public), busy=\(busyOverride, privacy: .public))")
+        let runId = UUID()
+        Self.log.info("run started (id=\(runId.uuidString, privacy: .public), scheduled=\(scheduled, privacy: .public), busy=\(busyOverride, privacy: .public))")
         // A run that starts is no longer waiting, whether the schedule or Run
         // Now started it.
         waitingReason = nil
         let task = Task { [weak self] in
             guard let self else { return }
-            await self.perform(plan, scheduled: scheduled, busyOverride: busyOverride)
+            await self.perform(plan, scheduled: scheduled, busyOverride: busyOverride, runId: runId)
         }
         runBox.set(task)
         return task
     }
 
     private func perform(_ regimen: CleanRegimen, scheduled: Bool = false,
-                         busyOverride: Bool = false) async {
+                         busyOverride: Bool = false, runId: UUID) async {
         let started = now()
         var result = RegimenRun(startedAt: started)
+        result.runId = runId
+        result.trigger = busyOverride ? .overdue : (scheduled ? .scheduled : .manual)
         // A run that stepped aside (a build in flight, or another cleanup
         // holding the lock) did not happen, so it must not start the
         // interval's clock.  Recording it would push a 24-hour regimen a whole
@@ -738,6 +824,9 @@ final class CleanRegimenRunner: ObservableObject {
             result.itemsRemoved += cleaned.itemsRemoved
             result.bytesReclaimed += cleaned.bytesReclaimed
             result.errors.append(contentsOf: cleaned.errors)
+            if let name = cleaned.snapshotName {
+                result.snapshotName = name
+            }
             batchIndex += 1
 
             if takeSnapshot {
@@ -765,31 +854,38 @@ final class CleanRegimenRunner: ObservableObject {
         }
 
         result.cancelled = Task.isCancelled
-        Self.log.info("run finished: reclaimed=\(result.bytesReclaimed, privacy: .public) items=\(result.itemsRemoved, privacy: .public) errors=\(result.errors.count, privacy: .public) cancelled=\(result.cancelled, privacy: .public) skip=\(result.skippedReason ?? "none", privacy: .public)")
+        Self.log.info("run finished (id=\(result.runId.uuidString, privacy: .public)): reclaimed=\(result.bytesReclaimed, privacy: .public) items=\(result.itemsRemoved, privacy: .public) errors=\(result.errors.count, privacy: .public) cancelled=\(result.cancelled, privacy: .public) skip=\(result.skippedReason ?? "none", privacy: .public)")
         finish(result, regimen: regimen)
     }
 
     /// Record a finished run for the panel.  Internal so a test can hand it a
     /// result without scanning the disk.
     func finish(_ result: RegimenRun, regimen: CleanRegimen) {
-        lastRun = result
+        var finished = result
+        if finished.finishedAt == nil {
+            finished.finishedAt = now()
+        }
+        lastRun = finished
+        recentRuns = Self.cappedHistory(finished, into: recentRuns)
+        persistRecentRun(finished)
+        appendHistoryRecord(for: finished)
         // A finished run is not waiting any more, whatever the panel showed
         // before it started.
         waitingReason = nil
         // A cancelled item is not a failure: it was not refused, the run was
         // stopped.  A failure that happened BEFORE the stop still is one, and
         // the stop must not hide it.
-        let failures = result.errors.filter { $0 != DiskCleaner.cancelledMessage }
-        if !result.errors.isEmpty {
+        let failures = finished.errors.filter { $0 != DiskCleaner.cancelledMessage }
+        if !finished.errors.isEmpty {
             // The raw message can carry an absolute path -- a safety check
             // that failed names the path it refused to delete -- so it goes to
             // `lastError`, which no view shows.  The panel gets a count.
-            lastError = failures.first ?? result.errors.first
+            lastError = failures.first ?? finished.errors.first
         }
-        let reclaimed: String? = result.itemsRemoved > 0
-            ? "Moved or removed \(HogFormat.memory(result.bytesReclaimed)) from \(result.itemsRemoved) items (estimated)."
+        let reclaimed: String? = finished.itemsRemoved > 0
+            ? "Moved or removed \(HogFormat.memory(finished.bytesReclaimed)) from \(finished.itemsRemoved) items (estimated)."
             : nil
-        if result.cancelled {
+        if finished.cancelled {
             // The run was stopped, not refused.  The panel keeps both facts:
             // what it reclaimed and what it could not remove.
             var parts = [reclaimed, "The cleanup was stopped before it finished."]
@@ -798,7 +894,7 @@ final class CleanRegimenRunner: ObservableObject {
                 parts.append(Self.failureCountText(failures.count))
             }
             lastSummary = parts.joined(separator: "\u{00A0} ")
-        } else if let reason = result.skippedReason {
+        } else if let reason = finished.skippedReason {
             // A run that removed something and then skipped still removed it:
             // the snapshot gate fails AFTER the engine thinned local
             // snapshots, so the reclaim is real.  Showing only the reason
@@ -807,14 +903,74 @@ final class CleanRegimenRunner: ObservableObject {
         } else if let reclaimed {
             // Some items were reclaimed and some were not.  The panel says
             // both, so a partial run does not read as a clean one.
-            lastSummary = result.errors.isEmpty
+            lastSummary = finished.errors.isEmpty
                 ? reclaimed
-                : "\(reclaimed)\u{00A0} \(Self.failureCountText(result.errors.count))"
-        } else if !result.errors.isEmpty {
-            lastSummary = Self.failureCountText(result.errors.count)
+                : "\(reclaimed)\u{00A0} \(Self.failureCountText(finished.errors.count))"
+        } else if !finished.errors.isEmpty {
+            lastSummary = Self.failureCountText(finished.errors.count)
         } else {
             lastSummary = "No reclaimable items."
         }
+    }
+
+    /// Newest-first history with the oldest runs dropped past the cap.
+    nonisolated static func cappedHistory(_ run: RegimenRun, into history: [RegimenRun]) -> [RegimenRun] {
+        Array(([run] + history).prefix(recentRunsCap))
+    }
+
+    /// The persisted run trail, newest first.  Decode-tolerant: a missing key
+    /// reads as no trail, and one bad record drops itself rather than the
+    /// other nineteen.  Nothing shows this in the UI yet; it is the trail the
+    /// panel's history will list.
+    func persistedRecentRuns() -> [RegimenRun] {
+        guard let data = historyDefaults.data(forKey: persistedRunsKey) else { return [] }
+        return Self.decodePersistedRuns(data)
+    }
+
+    /// One record per element, so a single corrupt record cannot take the
+    /// rest with it.  Mirrors `MaintainStore.loadHistory`.
+    nonisolated static func decodePersistedRuns(_ data: Data) -> [RegimenRun] {
+        guard let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+        let decoder = JSONDecoder()
+        return raw.compactMap { dict in
+            guard let element = try? JSONSerialization.data(withJSONObject: dict) else { return nil }
+            return try? decoder.decode(RegimenRun.self, from: element)
+        }
+    }
+
+    private func persistRecentRun(_ run: RegimenRun) {
+        guard persistHistory else { return }
+        let trail = Array(([run] + persistedRecentRuns()).prefix(Self.persistedRunsCap))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(trail) else { return }
+        historyDefaults.set(data, forKey: persistedRunsKey)
+    }
+
+    /// Who the cleanup log credits for an unattended run.  `nil` is a manual
+    /// Mac clean and `"iPhone"` is the phone's; the regimen is neither, so it
+    /// names itself.  Nothing filters on this value besides the phone's
+    /// `"iPhone"` chip, which an unattended run must never wear.
+    nonisolated static let automaticCleanupSource = "Automatic Cleanup"
+
+    /// The cleanup log's row for an unattended run, or nothing when the run
+    /// removed nothing.  Same gate as `CleanupHistoryRecord.record(from:)`,
+    /// which a regimen run cannot use directly: it takes one `CleanResult`
+    /// and a run spans many chunks, so the run's own totals are the record.
+    /// The record carries no category or title detail -- the run never kept
+    /// it -- only what it knows: bytes, count, time, snapshot, and source.
+    private func appendHistoryRecord(for run: RegimenRun) {
+        guard run.itemsRemoved > 0, let history = cleanupHistory else { return }
+        history.append(CleanupHistoryRecord(
+            bytesReclaimed: run.bytesReclaimed,
+            itemsRemoved: run.itemsRemoved,
+            tier: .standard,
+            categoryIds: [],
+            itemTitles: [],
+            snapshotName: run.snapshotName,
+            source: Self.automaticCleanupSource,
+            cleanedAt: run.finishedAt ?? run.startedAt
+        ))
     }
 
     /// How a count of failures reads in the panel.
@@ -964,8 +1120,26 @@ final class CleanRegimenRunner: ObservableObject {
     }
 }
 
+/// What started a regimen run.  `scheduled` is the interval, `manual` is a
+/// person pressing Run Now, and `overdue` is the override that starts a due
+/// run despite the idle gate (`overdueOverrideHours`).
+enum RegimenTrigger: String, Codable, Sendable {
+    case scheduled
+    case manual
+    case overdue
+
+    /// An unknown trigger decodes as manual rather than failing the record:
+    /// a persisted run written by a newer build must stay readable here.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = RegimenTrigger(rawValue: raw) ?? .manual
+    }
+}
+
 /// One regimen run, for the UI and for `lastSummary`.
-struct RegimenRun: Equatable, Sendable {
+struct RegimenRun: Equatable, Sendable, Codable {
+    var runId: UUID = UUID()
+    var trigger: RegimenTrigger = .manual
     var startedAt: Date
     var finishedAt: Date?
     var bytesReclaimed: UInt64 = 0
@@ -975,6 +1149,65 @@ struct RegimenRun: Equatable, Sendable {
     var pressureLabel: String?
     var chunkSize: Int?
     var cancelled: Bool = false
+    /// The APFS rollback point this run took, when it took one.  Copied from
+    /// the chunk that took it, so the run and its history row name it.
+    var snapshotName: String?
+
+    /// Explicit memberwise-style defaults initializer.  Declaring
+    /// `init(from:)` below suppresses Swift's synthesized memberwise init,
+    /// so this is spelled out the way `CleanRegimen` does.
+    init(
+        runId: UUID = UUID(),
+        trigger: RegimenTrigger = .manual,
+        startedAt: Date,
+        finishedAt: Date? = nil,
+        bytesReclaimed: UInt64 = 0,
+        itemsRemoved: Int = 0,
+        errors: [String] = [],
+        skippedReason: String? = nil,
+        pressureLabel: String? = nil,
+        chunkSize: Int? = nil,
+        cancelled: Bool = false,
+        snapshotName: String? = nil
+    ) {
+        self.runId = runId
+        self.trigger = trigger
+        self.startedAt = startedAt
+        self.finishedAt = finishedAt
+        self.bytesReclaimed = bytesReclaimed
+        self.itemsRemoved = itemsRemoved
+        self.errors = errors
+        self.skippedReason = skippedReason
+        self.pressureLabel = pressureLabel
+        self.chunkSize = chunkSize
+        self.cancelled = cancelled
+        self.snapshotName = snapshotName
+    }
+
+    /// Decode tolerantly: a record missing its start never was a run and is
+    /// dropped, but a record from an older or newer build keeps its fields.
+    /// `encode` and `CodingKeys` stay synthesized.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.container(keyedBy: CodingKeys.self)
+        guard let startedAt = try raw.decodeIfPresent(Date.self, forKey: .startedAt) else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.startedAt,
+                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "a regimen run without a start")
+            )
+        }
+        self.startedAt = startedAt
+        self.runId = try raw.decodeIfPresent(UUID.self, forKey: .runId) ?? UUID()
+        self.trigger = try raw.decodeIfPresent(RegimenTrigger.self, forKey: .trigger) ?? .manual
+        self.finishedAt = try raw.decodeIfPresent(Date.self, forKey: .finishedAt)
+        self.bytesReclaimed = try raw.decodeIfPresent(UInt64.self, forKey: .bytesReclaimed) ?? 0
+        self.itemsRemoved = try raw.decodeIfPresent(Int.self, forKey: .itemsRemoved) ?? 0
+        self.errors = try raw.decodeIfPresent([String].self, forKey: .errors) ?? []
+        self.skippedReason = try raw.decodeIfPresent(String.self, forKey: .skippedReason)
+        self.pressureLabel = try raw.decodeIfPresent(String.self, forKey: .pressureLabel)
+        self.chunkSize = try raw.decodeIfPresent(Int.self, forKey: .chunkSize)
+        self.cancelled = try raw.decodeIfPresent(Bool.self, forKey: .cancelled) ?? false
+        self.snapshotName = try raw.decodeIfPresent(String.self, forKey: .snapshotName)
+    }
 
     var succeeded: Bool {
         errors.isEmpty && !cancelled && skippedReason == nil

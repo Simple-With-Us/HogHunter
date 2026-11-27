@@ -331,7 +331,8 @@ struct HogHunterPanel: View {
         GeometryReader { geometry in
             VStack(alignment: .leading, spacing: 12) {
                 ScrollView {
-                    VPSResourceCardView(store: store.maintain.vpsStore, showsProcesses: false)
+                    VPSResourceCardView(store: store.maintain.vpsStore, showsProcesses: false,
+                                            control: store.serverControl, maintenance: store.serverMaintenance)
                         .background(GeometryReader { summary in
                             Color.clear.preference(key: ServerOverviewSummaryHeight.self, value: summary.size.height)
                         })
@@ -343,9 +344,7 @@ struct HogHunterPanel: View {
                 Text("Top Activity").font(.headline)
                 serverActivityColumn
                     .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
-                if let outcome = serverActivityControl.lastOutcome {
-                    Text(outcome.message).font(.caption).foregroundStyle(.secondary)
-                }
+                ServerControlOutcomeView(control: serverActivityControl, font: .caption)
             }
         }
     }
@@ -362,7 +361,7 @@ struct HogHunterPanel: View {
                 Text("Remote per-process connections and network rates are unavailable.")
                     .foregroundStyle(.secondary)
             case .storage:
-                Text("Server disks, app databases and largest directories")
+                Text("Server Disks, App Databases and Largest Directories")
                     .font(.headline)
             case .maintenance:
                 VStack(alignment: .leading, spacing: 12) {
@@ -374,7 +373,8 @@ struct HogHunterPanel: View {
                 EmptyView()
             }
             if let section = Self.serverSection(for: selectedTab) {
-                ServerStatusView(store: store.maintain.vpsStore, section: section)
+                ServerStatusView(store: store.maintain.vpsStore, section: section,
+                                   control: store.serverControl, maintenance: store.serverMaintenance)
             }
         }
     }
@@ -387,7 +387,8 @@ struct HogHunterPanel: View {
     /// same step the Mac's Maintenance tab runs, against the same configured
     /// host.
     private var remoteMaintenanceCard: some View {
-        RemoteMaintenanceCard(maintain: store.maintain)
+        RemoteMaintenanceCard(maintain: store.maintain, control: store.serverMaintenance,
+                                serverControl: store.serverControl)
     }
 
     private var activityContent: some View {
@@ -587,7 +588,7 @@ struct HogHunterPanel: View {
                         .font(.system(size: 10.5, weight: .medium))
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text("0 alerts")
+                    Text("0 Alerts")
                         .font(.system(size: 9.5))
                         .foregroundStyle(.tertiary)
                 }
@@ -610,7 +611,7 @@ struct HogHunterPanel: View {
                         Text("Flagged Issues")
                             .font(.system(size: 11, weight: .semibold))
                         Spacer()
-                        Text("\(issues.count) \(issues.count == 1 ? "alert" : "alerts")")
+                        Text("\(issues.count) \(issues.count == 1 ? "Alert" : "Alerts")")
                             .font(.system(size: 9.5, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
@@ -622,7 +623,7 @@ struct HogHunterPanel: View {
                         }
                     }
                     if issues.count > 3 {
-                        Button("View all \(issues.count) alerts") {
+                        Button("View All \(issues.count) Alerts") {
                             DetachedWindowManager.shared.openActivity(store: store)
                         }
                         .buttonStyle(.link)
@@ -655,6 +656,7 @@ struct HogHunterPanel: View {
             HStack(spacing: 2) {
                 Image(systemName: issue.host.systemImage)
                     .font(.system(size: 8))
+                    .accessibilityHidden(true)
                 Text(issue.host.rawValue)
                     .font(.system(size: 8.5, weight: .medium))
             }
@@ -1081,7 +1083,9 @@ struct HogHunterPanel: View {
 
     // MARK: - Activity Section
 
-    @StateObject private var serverActivityControl = ServerControl()
+    /// The store's one server control, shared with the phone routes and the
+    /// server card, so only one server action runs at a time whoever asked.
+    private var serverActivityControl: ServerControl { store.serverControl }
 
     /// The server's processes, as its own collector saw them.
     private var serverProcesses: [VPSProcess] {
@@ -1106,9 +1110,7 @@ struct HogHunterPanel: View {
             }
             .frame(maxHeight: .infinity, alignment: .topLeading)
 
-            if let outcome = serverActivityControl.lastOutcome {
-                Text(outcome.message).font(.system(size: 9)).foregroundStyle(.secondary)
-            }
+            ServerControlOutcomeView(control: serverActivityControl)
         }
         .frame(minHeight: 100)
     }
@@ -1211,7 +1213,8 @@ struct HogHunterPanel: View {
                                 .font(.system(size: 9).monospacedDigit())
                                 .foregroundStyle(.secondary)
                             ServerProcessActions(process: process, host: store.maintain.vpsStore.configuredHost,
-                                                 control: serverActivityControl, showsStopButton: true)
+                                                 control: serverActivityControl, maintenance: store.serverMaintenance,
+                                                 showsStopButton: true)
                         }
                     }
                     if serverProcesses.isEmpty {
@@ -1844,7 +1847,7 @@ struct HogActivityRow: View {
 
     /// What a screen reader says for the row.
     var accessibilityLabel: String {
-        "\(name), CPU \(cpuText), memory \(memoryText)"
+        "\(name), CPU \(cpuText), Memory \(memoryText)"
     }
 
     var body: some View {

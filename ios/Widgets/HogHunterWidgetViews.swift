@@ -436,9 +436,14 @@ struct HogHunterMediumWidgetView: View {
 
 struct HogHunterLargeWidgetView: View {
     let entry: HogHunterWidgetEntry
+    /// Past this the reading is stale.  Matches CompanionFreshness.staleAfter;
+    /// restated because the widget target does not include that file.
+    private static let staleAfter: TimeInterval = 15
 
     var body: some View {
         if let snap = entry.snapshot {
+            // The timeline date, not now: the widget draws a frozen entry.
+            let stale = entry.date.timeIntervalSince(snap.sampledAt) > Self.staleAfter
             VStack(alignment: .leading, spacing: 8) {
                 // Header
                 HStack {
@@ -452,10 +457,13 @@ struct HogHunterLargeWidgetView: View {
                         Text("\(snap.window) · \(snap.grouping)")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                        (Text("as of ") + Text(snap.sampledAt, style: .relative))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                     Spacer()
                     Circle()
-                        .fill(Color.green)
+                        .fill(stale ? Color.secondary : Color.green)
                         .frame(width: 8, height: 8)
                 }
 

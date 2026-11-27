@@ -44,6 +44,55 @@ struct MaintainStatus: Codable, Equatable {
     }
 }
 
+/// How the Maintain card should describe reachability, kept apart from the
+/// engine's health word so a missing or stale reading is never shown as a
+/// schedule state.  Presentation only: no schedule or timing changes.
+enum MaintainReachability: Equatable {
+    case noReading
+    case running
+    case waiting
+    case unreachable
+    case ready
+
+    var title: String {
+        switch self {
+        case .noReading: return "No Reading Yet"
+        case .running: return "Running Now"
+        case .waiting: return "Waiting For First Run"
+        case .unreachable: return "Unreachable"
+        case .ready: return "On Schedule"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .noReading: return "Maintain has not reported yet.\u{00A0} Its first report appears after the background job runs."
+        case .running: return "A maintenance run is in progress.\u{00A0} This card updates when it finishes."
+        case .waiting: return "Maintain has reported, but no full run has finished yet.\u{00A0} Run one now or wait for the schedule."
+        case .unreachable: return "The last report is stale or the background job is not loaded.\u{00A0} Check that the background job is running."
+        case .ready: return ""
+        }
+    }
+}
+
+extension MaintainStatus {
+    /// A report older than this is stale for display.  The engine reports
+    /// every few minutes, so three missed reports read as unreachable.
+    static let staleAfter: TimeInterval = 15 * 60
+
+    static func reachability(status: MaintainStatus?, isRunning: Bool, now: Date) -> MaintainReachability {
+        if isRunning { return .running }
+        guard let status else { return .noReading }
+        if let updatedAt = status.updatedAt, updatedAt > 0,
+           now.timeIntervalSince(Date(timeIntervalSince1970: updatedAt)) > staleAfter {
+            return .unreachable
+        }
+        if !status.launchdLoaded, status.health == "unloaded" { return .unreachable }
+        if (status.lastRunAt?["full"] ?? 0) <= 0 { return .waiting }
+        return .ready
+    }
+}
+
 /// How much room is left, as the engine's watch tick last measured it.
 ///
 /// The engine used to report "healthy" while the disk sat at 100% with three
