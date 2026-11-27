@@ -3574,6 +3574,52 @@ def _test_cache_scope(child: Path) -> tuple[Path, Path, str | None] | None:
     return (inner[0], child if not strays else inner[0], None)
 
 
+def _test_cache_base_delete_refusal(base: Path) -> str | None:
+    """Why the whole checkout base may not go even though its DerivedData
+    root passed every gate, or None.  The base has no info.plist, so the
+    identity gate is skipped; every delete-safety gate of
+    _xcode_scratch_refusal runs on the base itself -- ownership, mount,
+    protected paths, idleness, precious content, keep markers, nested
+    repositories, open handles -- so a sibling the root's gates never saw
+    still stops a whole-base sweep.  A refusal here shrinks the delete to
+    the identified root alone."""
+    s = str(base)
+    try:
+        st = os.lstat(s)
+        root_dev = os.lstat(base.parent).st_dev
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            return "not a real directory"
+        if st.st_uid != os.getuid():
+            return "owned by someone else"
+        if st.st_dev != root_dev:
+            return "a mount point"
+    except OSError as exc:
+        return f"could not read it ({type(exc).__name__})"
+    if is_forbidden(s) or has_keep_sentinel(s):
+        return "protected"
+    idle_min, idle_label = _xcode_scratch_idle_min(read_disk_free())
+    if (changed_age_min(s) < idle_min
+            or _shallow_newest_age_min(base) < idle_min
+            or _deep_newest_age_min(base) < idle_min):
+        return f"used in the last {idle_label}"
+    precious = _derived_data_precious_refusal(base)
+    if precious:
+        return precious
+    marker = holds_keep_sentinel(s, probe_timeout(60.0))
+    if marker.found or not marker.known:
+        return "holds a keep marker, or the look failed"
+    nested = regenerable_clones_only(base)
+    if nested:
+        return nested
+    if tree_in_use(s):
+        return "held open"
+    if repo_has_process_cwd(s):
+        return "a process runs from it"
+    if process_names_path(s) or process_names_path(base.name):
+        return "a running process names it"
+    return None
+
+
 def _workspace_path_refusal(tree: Path) -> str | None:
     """Xcode writes `info.plist` at a DerivedData root with the workspace it
     built.  A root without that is not positively Xcode's, or None."""
@@ -3824,6 +3870,16 @@ def rule_xcode_scratch() -> list[Candidate]:
                 if size < MIN_CANDIDATE_BYTES:
                     continue
                 refusal = base_refusal or _xcode_scratch_refusal(identify)
+                if refusal is None and delete != identify:
+                    # The whole base was offered; it must pass its own
+                    # delete-safety gates, and a refusal shrinks the delete
+                    # to the identified root alone.
+                    base_refusal = _test_cache_base_delete_refusal(delete)
+                    if base_refusal is not None:
+                        delete = identify
+                        size = dir_bytes(str(delete))
+                        if size < MIN_CANDIDATE_BYTES:
+                            continue
                 if refusal is not None:
                     cands.append(Candidate(
                         category="xcode-scratch", path=str(delete), bytes=size,
@@ -3837,9 +3893,16 @@ def rule_xcode_scratch() -> list[Candidate]:
                     if path_identity(str(delete)) != identity:
                         return "the path now holds something else"
                     scope = _test_cache_scope(child)
-                    if scope is None or scope[1] != delete:
-                        return "the checkout base no longer holds the same tree"
-                    return _xcode_scratch_refusal(scope[0])
+                    if scope is None:
+                        return "the checkout base no longer holds Xcode's tree"
+                    identify2, delete2, _ = scope
+                    if delete2 != identify2:
+                        base_ref = _test_cache_base_delete_refusal(delete2)
+                        if base_ref is not None:
+                            delete2 = identify2
+                    if delete2 != delete:
+                        return "the delete scope changed"
+                    return _xcode_scratch_refusal(identify2)
 
                 cands.append(Candidate(
                     category="xcode-scratch", path=str(delete), bytes=size,

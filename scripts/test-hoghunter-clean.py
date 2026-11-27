@@ -4475,6 +4475,35 @@ def test_test_cache_symlinked_base_is_skipped(hh):
         assert base.is_symlink() and tree.exists(), "the link and its target stay"
 
 
+def test_test_cache_base_gate_shrinks_to_the_root(hh):
+    """A whitelisted sibling can hold something the root's gates never saw --
+    here a nested repository inside Build/ -- and the base-level gate must
+    stop the whole-base delete: the root still goes, the base keeps the
+    sibling."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root, base, tree = _test_cache_fixture(home)
+        blob(base / "Build" / "keep-repo" / "file", 30)
+        (base / "Build" / "keep-repo" / ".git").mkdir()
+        settle(base, 30)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 1, report
+        assert not tree.exists(), "the identified root still goes"
+        assert base.exists(), "the sibling keeps the base"
+
+
+def test_test_cache_base_marker_spares_the_base(hh):
+    """A keep marker inside a whitelisted sibling is invisible to the root's
+    gates; the base-level gate walks the base and shrinks the delete."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root, base, tree = _test_cache_fixture(home)
+        (base / "SDKStatCaches.noindex" / ".janitor-keep").write_text("", encoding="utf-8")
+        settle(base, 30)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 1, report
+        assert not tree.exists(), "the identified root still goes"
+        assert base.exists(), "the marker keeps the base"
+
+
 def test_the_roots_list_names_the_test_cache(hh):
     with fake_home(hh) as home:
         roots = [(str(r), mode) for r, mode in hh._xcode_scratch_roots()]
