@@ -38,7 +38,10 @@ enum OverviewSplit {
     /// The height of the summary region for a page `available` tall whose summary
     /// content measured `content` (0 until it has been measured).
     static func summaryHeight(available: CGFloat, content: CGFloat) -> CGFloat {
-        let cap = max(summaryFloor, min(available * summaryShare, available - activityFloor))
+        // The floor keeps the summary from collapsing in a short window (the
+        // regression this replaced), but it never exceeds the page itself.
+        let cap = min(max(summaryFloor, min(available * summaryShare, available - activityFloor)),
+                      max(available, 0))
         guard content > 0 else { return cap }
         return min(content, cap)
     }
