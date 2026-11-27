@@ -88,6 +88,22 @@ def sample_mac() -> dict[str, Any]:
     }
 
 
+def disk_free_floors(cfg: dict[str, Any]) -> tuple[float, float]:
+    """(crit_gb, warn_gb): the free-space lines the owner's reclaim posture sets.
+
+    The janitor floors carry the owner's configured posture; the
+    resource_watch keys are the fallback for a config that carries only
+    those.  Every surface that judges free space reads this one resolver --
+    the watch's pressure trigger, the panel's disk health, and the reclaim
+    band -- so no two of them can call the same free space different things.
+    """
+    rw_cfg = cfg.get("resource_watch", {})
+    janitor_cfg = cfg.get("janitor", {})
+    crit = float(janitor_cfg.get("crit_free_gib", rw_cfg.get("disk_free_crit_gb", 15)))
+    warn = float(janitor_cfg.get("pressure_free_gib", rw_cfg.get("disk_free_warn_gb", 25)))
+    return crit, warn
+
+
 def evaluate_hits(sample: dict[str, Any], prev_free: Optional[float], rw_cfg: dict[str, Any]) -> list[dict[str, Any]]:
     hits: list[dict[str, Any]] = []
     free = float(sample.get("disk_free_gb", 0))

@@ -35,6 +35,7 @@ Modes are mutually exclusive with --categories=... --policy to see everything.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import plistlib
@@ -2138,36 +2139,104 @@ def rule_xcode_artifacts() -> list[Candidate]:
     return cands
 
 
+# A runtime bundle name starts with the platform, then a separator, then the
+# version: "iOS 27.2.simruntime", "iOS_27_2.simruntime", "watchOS 11.4...".
+# The pattern is anchored so a directory that merely CONTAINS a platform word
+# ("Old iOS_26_5 backup") is not read as a runtime; whatever does not parse
+# is kept, never offered.
+_RUNTIME_NAME_RE = re.compile(r"\s*(ios|tvos|watchos|visionos|xros)[-_ ]+(\d+(?:[-_.]\d+)*)", re.I)
+
+
+def _runtime_platform_version(name: str) -> tuple[str, tuple[int, ...]] | None:
+    """('ios', (27, 2)) from a .simruntime bundle name, or None when it does not parse."""
+    m = _RUNTIME_NAME_RE.match(name)
+    if not m:
+        return None
+    version = tuple(int(p) for p in re.split(r"[-_.]", m.group(2)) if p.isdigit())
+    if not version:
+        return None
+    return m.group(1).lower(), version
+
+
+@functools.cache
+def _xcode_iphoneos_sdk_version() -> tuple[int, ...] | None:
+    """The iOS SDK version of the selected Xcode, or None when it cannot be read.
+
+    One probe per process: the selected Xcode does not change during a run,
+    and xcrun can take seconds on a cold start, so repeat callers share the
+    first answer.  A healthy xcrun answers in well under a second; a hung
+    one must not hold the scan, and the rule fails closed when it cannot
+    read the SDK.
+    """
+    try:
+        p = subprocess.run(
+            ["/usr/bin/xcrun", "--sdk", "iphoneos", "--show-sdk-version"],
+            capture_output=True, text=True, timeout=probe_timeout(5.0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    m = re.match(r"\s*(\d+(?:\.\d+)*)", p.stdout or "")
+    if not m:
+        return None
+    return tuple(int(x) for x in m.group(1).split("."))
+
+
 def rule_simulator_runtimes() -> list[Candidate]:
-    """Installed iOS simulator runtimes.
+    """Installed simulator runtimes.
 
     Large (18+ GB measured), fully re-downloadable from Xcode.  Deleting a
     runtime does not touch CoreSimulator/Devices, which stays ask-first.
+
+    A runtime is kept, never offered, when any of these holds:
+    - it is the newest runtime of its platform (a freshly installed newer
+      release or beta is always kept);
+    - it is an iOS runtime whose major version matches the selected Xcode's
+      iOS SDK (the runtime that Xcode is built to use);
+    - the SDK version cannot be read, for any iOS runtime (the identity of
+      the runtime Xcode needs is then unknown, so the rule fails closed);
+    - its bundle name does not parse.
+    A platform with exactly one runtime therefore offers nothing.
     """
     if (proc_count_exact("xcodebuild") or proc_count("Simulator") or
             proc_count("CoreSimulatorService") or proc_count("[Bb]itrig")):
         return []
-    cands: list[Candidate] = []
     roots = [
         HOME / "Library/Developer/CoreSimulator/Profiles/Runtimes",
         Path("/Library/Developer/CoreSimulator/Profiles/Runtimes"),
     ]
+    installed: list[Path] = []
     for root in roots:
         if not root.is_dir() or has_keep_sentinel(str(root)):
             continue
         for rt in root.iterdir():
-            if not rt.is_dir() or is_forbidden(str(rt)):
+            if rt.is_dir() and not is_forbidden(str(rt)):
+                installed.append(rt)
+    newest: dict[str, tuple[int, ...]] = {}
+    for rt in installed:
+        pv = _runtime_platform_version(rt.name)
+        if pv and (pv[0] not in newest or pv[1] > newest[pv[0]]):
+            newest[pv[0]] = pv[1]
+    ios_sdk = _xcode_iphoneos_sdk_version()
+    cands: list[Candidate] = []
+    for rt in installed:
+        pv = _runtime_platform_version(rt.name)
+        if pv is None or pv[1] >= newest[pv[0]]:
+            continue
+        if pv[0] == "ios":
+            if ios_sdk is None or (ios_sdk and pv[1] and pv[1][0] == ios_sdk[0]):
                 continue
-            is_ios27 = bool(re.search(r"iOS[-_ ]?27", rt.name, re.I))
-            if is_ios27 and not CLEAN_IOS27:
-                continue
-            if newest_file_age_min(str(rt)) < 60 * 48 or open_handles(str(rt)):
-                continue
-            cands.append(Candidate(
-                category="simulator-runtimes", path=str(rt), bytes=dir_bytes(str(rt)),
-                reason="iOS simulator runtime untouched for 48h+, re-downloadable",
-                tier="expensive",
-            ))
+        is_ios27 = bool(re.search(r"iOS[-_ ]?27", rt.name, re.I))
+        if is_ios27 and not CLEAN_IOS27:
+            continue
+        if newest_file_age_min(str(rt)) < 60 * 48 or open_handles(str(rt)):
+            continue
+        cands.append(Candidate(
+            category="simulator-runtimes", path=str(rt), bytes=dir_bytes(str(rt)),
+            reason="older simulator runtime untouched for 48h+, re-downloadable",
+            tier="expensive",
+        ))
     return cands
 
 

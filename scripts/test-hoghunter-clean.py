@@ -3482,6 +3482,130 @@ def test_every_rule_is_in_the_policy_and_the_engine_only_rules_are_not_schedulab
         assert f'"{name}"' not in block, f"the regimen cannot run {name}, so it must not offer it"
 
 
+def test_simulator_runtimes_keeps_the_newest_runtime_of_each_platform(hh):
+    """The newest runtime of a platform (a fresh release or beta) is never
+    offered; an older runtime of the same platform still is.  The iOS-27
+    gate is disabled here so the keep guard, not that gate, is what protects
+    the 27.2 bundle; the Xcode SDK read is pinned to 27."""
+    with fake_home(hh) as home, gates_open(hh), mock.patch.object(hh, "open_handles", return_value=0), \
+            mock.patch.object(hh, "_xcode_iphoneos_sdk_version", return_value=(27, 2), create=True):
+        runtimes = home / "Library/Developer/CoreSimulator/Profiles/Runtimes"
+        old_ios = old_tree(runtimes / "iOS_26_5.simruntime")
+        new_ios = old_tree(runtimes / "iOS_27_2.simruntime")
+        hh.CLEAN_IOS27 = True
+        try:
+            paths = rule_paths(hh.rule_simulator_runtimes())
+        finally:
+            hh.CLEAN_IOS27 = False
+        assert str(old_ios) in paths, paths
+        assert str(new_ios) not in paths, paths
+
+
+def test_simulator_runtimes_offers_nothing_when_one_runtime_is_installed(hh):
+    """A platform with exactly one runtime: with nothing newer beside it the
+    rule must offer nothing, even with every process gate open and the bundle
+    long idle."""
+    with fake_home(hh) as home, gates_open(hh), mock.patch.object(hh, "open_handles", return_value=0), \
+            mock.patch.object(hh, "_xcode_iphoneos_sdk_version", return_value=(26, 5), create=True):
+        old_tree(home / "Library/Developer/CoreSimulator/Profiles/Runtimes/iOS_26_5.simruntime")
+        assert hh.rule_simulator_runtimes() == []
+
+
+def test_simulator_runtimes_keeps_unparseable_and_per_platform_newest(hh):
+    """The guard is per platform: an old watchOS bundle is still offered next
+    to a newer one, and a bundle whose name does not parse is kept rather
+    than risk deleting a runtime Xcode needs."""
+    with fake_home(hh) as home, gates_open(hh), mock.patch.object(hh, "open_handles", return_value=0), \
+            mock.patch.object(hh, "_xcode_iphoneos_sdk_version", return_value=(27, 2), create=True):
+        rt = home / "Library/Developer/CoreSimulator/Profiles/Runtimes"
+        old_watch = old_tree(rt / "watchOS_11_0.simruntime")
+        new_watch = old_tree(rt / "watchOS_11_4.simruntime")
+        odd = old_tree(rt / "OddBundle.simruntime")
+        paths = rule_paths(hh.rule_simulator_runtimes())
+        assert str(old_watch) in paths, paths
+        assert str(new_watch) not in paths, paths
+        assert str(odd) not in paths, paths
+
+
+def test_simulator_runtimes_keeps_the_sdk_runtime_beside_a_newer_beta(hh):
+    """A newer beta makes the release runtime not-the-newest, and the release
+    is still the one the selected Xcode is built to use: the iOS runtime
+    matching the Xcode SDK's major version is never offered."""
+    with fake_home(hh) as home, gates_open(hh), mock.patch.object(hh, "open_handles", return_value=0), \
+            mock.patch.object(hh, "_xcode_iphoneos_sdk_version", return_value=(27, 2), create=True):
+        rt = home / "Library/Developer/CoreSimulator/Profiles/Runtimes"
+        release = old_tree(rt / "iOS_27_2.simruntime")
+        beta = old_tree(rt / "iOS_28_0.simruntime")
+        hh.CLEAN_IOS27 = True
+        try:
+            assert hh.rule_simulator_runtimes() == []
+        finally:
+            hh.CLEAN_IOS27 = False
+        assert release.is_dir() and beta.is_dir()
+
+
+def test_simulator_runtimes_fail_closed_when_the_sdk_version_is_unreadable(hh):
+    """When the selected Xcode's SDK version cannot be read, the identity of
+    the runtime Xcode needs is unknown: no iOS runtime is offered at all.
+    Other platforms still follow the keep-newest rule."""
+    with fake_home(hh) as home, gates_open(hh), mock.patch.object(hh, "open_handles", return_value=0), \
+            mock.patch.object(hh, "_xcode_iphoneos_sdk_version", return_value=None, create=True):
+        rt = home / "Library/Developer/CoreSimulator/Profiles/Runtimes"
+        old_ios = old_tree(rt / "iOS_26_5.simruntime")
+        old_watch = old_tree(rt / "watchOS_11_0.simruntime")
+        old_tree(rt / "watchOS_11_4.simruntime")
+        paths = rule_paths(hh.rule_simulator_runtimes())
+        assert str(old_ios) not in paths, paths
+        assert str(old_watch) in paths, paths
+
+
+def test_xcode_sdk_version_parsing(hh):
+    """The SDK reader takes the leading version tuple and nothing else."""
+    import subprocess as sp
+    reader = hh._xcode_iphoneos_sdk_version
+    for result, want in (
+        (sp.CompletedProcess([], 0, "27.2\n", ""), (27, 2)),
+        (sp.CompletedProcess([], 1, "", "err"), None),
+    ):
+        reader.cache_clear()
+        with mock.patch.object(hh.subprocess, "run", return_value=result):
+            assert reader() == want
+    reader.cache_clear()
+    with mock.patch.object(hh.subprocess, "run", side_effect=OSError("no xcrun")):
+        assert reader() is None
+    reader.cache_clear()
+
+
+def test_xcode_sdk_version_probe_runs_once_per_process(hh):
+    """xcrun can take seconds on a cold start and the selected Xcode does not
+    change during a run: repeat readers share the first probe's answer."""
+    import subprocess as sp
+    reader = hh._xcode_iphoneos_sdk_version
+    reader.cache_clear()
+    try:
+        with mock.patch.object(hh.subprocess, "run",
+                               return_value=sp.CompletedProcess([], 0, "27.2\n", "")) as run:
+            assert reader() == (27, 2)
+            assert reader() == (27, 2)
+        assert run.call_count == 1
+    finally:
+        reader.cache_clear()
+
+
+def test_runtime_name_parser_is_anchored(hh):
+    """Only a name that STARTS with the platform parses.  A directory that
+    merely contains a platform word is not read as a runtime, and whatever
+    does not parse is kept, never offered."""
+    parse = hh._runtime_platform_version
+    assert parse("iOS 27.2.simruntime") == ("ios", (27, 2))
+    assert parse("iOS_27_2.simruntime") == ("ios", (27, 2))
+    assert parse("watchOS 11.4.simruntime") == ("watchos", (11, 4))
+    assert parse("tvOS-26-2.simruntime") == ("tvos", (26, 2))
+    assert parse("com.apple.CoreSimulator.SimRuntime.iOS-27-2") is None
+    assert parse("Old iOS_26_5 backup.simruntime") is None
+    assert parse("iOS27.simruntime") is None
+
+
 def test_the_policy_states_the_tier_the_simulator_rule_really_runs_at(hh):
     """The code files whole runtimes under `expensive`, opened only at real space
     pressure, and the policy said semi-safe.  Nothing reads the JSON's tier, so
