@@ -89,6 +89,11 @@ final class CleanRegimenRunner: ObservableObject {
     /// clock: a run that tripped the gate did not happen, and the two states
     /// have to be told apart.
     private let gateFailureKey = "hoghunter.cleaner.regimen.lastGateFailureAt"
+    /// When a partial-discovery run last ran, kept apart from the
+    /// completed-run clock: a partial run did not see the whole disk, so it
+    /// does not start the interval's clock.  Kept apart from the gate
+    /// failure too, because a partial run did clean what it found.
+    private let partialRunKey = "hoghunter.cleaner.regimen.lastPartialRunAt"
     /// The persisted run trail: a JSON array of the newest finished runs.
     /// Additive beside the clock keys above, in the app-group suite, so an
     /// older build that never heard of it keeps working untouched.
@@ -104,6 +109,24 @@ final class CleanRegimenRunner: ObservableObject {
     /// enough that the cleaner is not left idle for a whole interval after
     /// the blocker is gone.
     static let gateBackoff: TimeInterval = 60 * 60
+
+    /// How long a partial-discovery run backs off before the runner pays
+    /// for the full-disk scan again.
+    ///
+    /// A partial run cleans what it found, but the scan did not see the
+    /// whole disk, so the interval's clock must not start: the unseen part
+    /// still needs a run.  Retrying at every check pays a whole-disk walk
+    /// four times an hour for an answer that does not change -- a category
+    /// whose walk keeps failing fails the same way minutes later -- and
+    /// holds the housekeeper lock against the Python ticks while it does.
+    /// Same shape and length as the safety gate's backoff, which exists
+    /// for the same reason.
+    static let partialRetryBackoff: TimeInterval = gateBackoff
+
+    /// What the run record says while a partial-discovery run is still in
+    /// flight:  only what scan time already knows, nothing about a clean
+    /// that has not finished -- or even started -- yet.
+    private static let partialDiscoveryReason = "Discovery was incomplete; the full scan tries again later."
 
     /// How long a due run may sit held by the regimen's own conditions
     /// before it starts anyway, in the pressured chunk shape.
@@ -280,6 +303,12 @@ final class CleanRegimenRunner: ObservableObject {
         if let gateFailure = gateFailureAt, now().timeIntervalSince(gateFailure) < Self.gateBackoff {
             return false
         }
+        // A partial run backs off like a failed gate: it cleaned what it
+        // found, but it did not see the whole disk, so it stays due --
+        // just not again at the very next check.
+        if let partial = partialRunAt, now().timeIntervalSince(partial) < Self.partialRetryBackoff {
+            return false
+        }
         guard let lastRunAt else { return true }
         return now().timeIntervalSince(lastRunAt) >= regimen.effectiveIntervalHours * 3600
     }
@@ -292,6 +321,16 @@ final class CleanRegimenRunner: ObservableObject {
     /// When the runner may try the gate again.
     var gateRetryDate: Date? {
         gateFailureAt.map { $0.addingTimeInterval(Self.gateBackoff) }
+    }
+
+    /// When a partial-discovery run last ran, if one did.
+    private var partialRunAt: Date? {
+        lastRunDefaults.object(forKey: partialRunKey) as? Date
+    }
+
+    /// When the runner may pay for the full scan again after a partial one.
+    var partialRetryDate: Date? {
+        partialRunAt.map { $0.addingTimeInterval(Self.partialRetryBackoff) }
     }
 
     /// The one status line the panel shows: running, gate retry time,
@@ -356,6 +395,15 @@ final class CleanRegimenRunner: ObservableObject {
                 // that was due -- which is every gate failure -- so taking
                 // the later of the two is what keeps the panel off a time
                 // that has gone by.
+                let intervalNext = lastRunAt.map {
+                    $0.addingTimeInterval(regimen.effectiveIntervalHours * 3600)
+                }
+                nextRunDate = intervalNext.map { max(retry, $0) } ?? retry
+            } else if regimen.isEnabled, let retry = partialRetryDate, retry > now() {
+                // A partial run cleaned what it found;  the wait now is the
+                // scan backoff, and the panel says so rather than going
+                // quiet or advertising a check-time retry that will not run.
+                waitingReason = "The last scan was incomplete; the full scan tries again later."
                 let intervalNext = lastRunAt.map {
                     $0.addingTimeInterval(regimen.effectiveIntervalHours * 3600)
                 }
@@ -564,6 +612,7 @@ final class CleanRegimenRunner: ObservableObject {
         let started = now()
         lastRunDefaults.set(started, forKey: defaultsKey)
         lastRunDefaults.removeObject(forKey: dueSinceKey)
+        lastRunDefaults.removeObject(forKey: partialRunKey)
         updateNextRun(regimen: plan, lastRunAt: started)
     }
 
@@ -637,6 +686,10 @@ final class CleanRegimenRunner: ObservableObject {
         // happen, and the next attempt waits a little rather than repeating
         // the scan every check.
         var gateFailed = false
+        // A run whose scan was incomplete cleaned only what it saw:  it does
+        // not start the interval's clock, but the retry waits out the
+        // partial backoff instead of re-walking the disk at the next check.
+        var discoveryPartial = false
         defer {
             isRunning = false
             // A cancelled run is not a completed one: the app is quitting or
@@ -645,19 +698,27 @@ final class CleanRegimenRunner: ObservableObject {
             if recordsRun && !Task.isCancelled {
                 lastRunDefaults.set(started, forKey: defaultsKey)
                 lastRunDefaults.removeObject(forKey: dueSinceKey)
-                // The gate works again, so the backoff it earned is over.
+                // A completed run clears every hold it could have been
+                // under:  the gate's backoff and the partial scan's alike.
                 lastRunDefaults.removeObject(forKey: gateFailureKey)
+                lastRunDefaults.removeObject(forKey: partialRunKey)
                 updateNextRun(regimen: regimen, lastRunAt: started)
             } else {
                 if gateFailed {
                     lastRunDefaults.set(started, forKey: gateFailureKey)
                 }
-                // A failed gate waits out the backoff, so that is the time to
-                // publish.  The check interval would advertise a run in fifteen
-                // minutes that `isDue` refuses to start for an hour, and the
-                // waiting reason is already gone by then.
+                if discoveryPartial {
+                    lastRunDefaults.set(started, forKey: partialRunKey)
+                }
+                // A failed gate or a partial scan waits out its backoff, so
+                // that is the time to publish.  The check interval would
+                // advertise a run in fifteen minutes that `isDue` refuses
+                // to start for an hour, and the waiting reason is already
+                // gone by then.
+                let retryAfter = gateFailed ? Self.gateBackoff
+                    : discoveryPartial ? Self.partialRetryBackoff : checkInterval
                 nextRunDate = regimen.isEnabled
-                    ? started.addingTimeInterval(gateFailed ? Self.gateBackoff : checkInterval)
+                    ? started.addingTimeInterval(retryAfter)
                     : nil
             }
         }
@@ -743,7 +804,8 @@ final class CleanRegimenRunner: ObservableObject {
         if scan.isPartial {
             Self.log.notice("run continues with partial discovery (cleaning the found subset)")
             recordsRun = false
-            result.skippedReason = "Discovery was incomplete; the regimen will retry at the next check."
+            discoveryPartial = true
+            result.skippedReason = Self.partialDiscoveryReason
         }
         // `CleanScanReport` groups by category rather than exposing a flat
         // item list, so flatten the selected items from each report.
@@ -773,7 +835,12 @@ final class CleanRegimenRunner: ObservableObject {
             }
             : []
         guard decision.skipReason == nil || !valveItems.isEmpty || !snapshotItems.isEmpty else {
-            result.skippedReason = result.skippedReason ?? decision.skipReason
+            if discoveryPartial {
+                // No clean ran, so the record must not claim one.
+                result.skippedReason = "Discovery was incomplete (no items cleaned); the full scan tries again later."
+            } else {
+                result.skippedReason = result.skippedReason ?? decision.skipReason
+            }
             recordsRun = false
             finish(result, regimen: regimen)
             return
@@ -854,6 +921,16 @@ final class CleanRegimenRunner: ObservableObject {
         }
 
         result.cancelled = Task.isCancelled
+        if discoveryPartial, result.skippedReason == Self.partialDiscoveryReason {
+            // The record says what the scan knows plus what the clean
+            // actually did -- counters and errors, never a blanket claim.
+            let itemWord = result.itemsRemoved == 1 ? "item" : "items"
+            let errorWord = result.errors.count == 1 ? "error" : "errors"
+            let outcome = result.cancelled
+                ? "the run was cancelled"
+                : "cleaned \(result.itemsRemoved) \(itemWord) with \(result.errors.count) \(errorWord)"
+            result.skippedReason = "Discovery was incomplete (\(outcome)); the full scan tries again later."
+        }
         Self.log.info("run finished (id=\(result.runId.uuidString, privacy: .public)): reclaimed=\(result.bytesReclaimed, privacy: .public) items=\(result.itemsRemoved, privacy: .public) errors=\(result.errors.count, privacy: .public) cancelled=\(result.cancelled, privacy: .public) skip=\(result.skippedReason ?? "none", privacy: .public)")
         finish(result, regimen: regimen)
     }

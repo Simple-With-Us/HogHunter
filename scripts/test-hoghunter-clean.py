@@ -4520,6 +4520,121 @@ def clean_main(hh, argv, free, apply_free=None):
     return json.loads(out.getvalue())
 
 
+def _test_cache_fixture(home, base_name="zc-lane-92524eaa8430"):
+    """The layout a plain workspace build really leaves: xcodegen-post points
+    the checkout at <cache>/<checkout>-<hash>, and Xcode appends its own
+    HogHunter-<hash> below that, with ever-refreshing module caches beside
+    it."""
+    cache_root = home / "Library" / "Caches" / "HogHunterDerivedData"
+    base = cache_root / base_name
+    tree = xcode_tree(home, "HogHunter-gypzzncfdrkbjcaurhenaphjrkpw", root=base)
+    for noise in ("SDKExplicitPrecompiledModules", "SDKStatCaches.noindex"):
+        blob(base / noise / "pad", 30)
+    settle(base, 30)
+    return cache_root, base, tree
+
+
+def test_test_cache_sweep_covers_the_app_deriveddata_cache(hh):
+    """The app's own test-build cache (xcodegen-post's default DerivedData)
+    joins the sweep: same shape gates, same pressure line.  17 GB of
+    repeated full-suite runs sat idle there while the disk was at 23 GB."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root, base, tree = _test_cache_fixture(home)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 1, report
+        assert not base.exists(), "the whole checkout base goes"
+        assert cache_root.is_dir(), "the cache folder stays"
+
+
+def test_test_cache_scan_refuses_content_under_the_cache_root(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root, base, tree = _test_cache_fixture(home)
+        (tree / "Package.swift").write_text("x", encoding="utf-8")
+        settle(base, 30)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert tree.exists(), "content that looks like source keeps the root"
+        assert base.exists(), "nothing under the cache root is deleted"
+        assert report["applied_count"] == 0, report
+
+
+def test_test_cache_stray_at_the_base_spares_the_base(hh):
+    """A file the checkout's owner dropped beside the build caches is not
+    build noise: the DerivedData root still goes, the base stays."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root, base, tree = _test_cache_fixture(home)
+        (base / "notes.txt").write_text("mine", encoding="utf-8")
+        settle(base, 30)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 1, report
+        assert not tree.exists(), "the identified DerivedData root goes"
+        assert base.exists(), "the stray keeps the base"
+
+
+def test_test_cache_flat_base_joins_the_sweep(hh):
+    """An explicit -derivedDataPath run writes the DerivedData root at the
+    base itself; it is the same positive identification."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root = home / "Library" / "Caches" / "HogHunterDerivedData"
+        flat = xcode_tree(home, "hh-dd-flat", root=cache_root)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 1, report
+        assert not flat.exists(), "the flat base goes"
+
+
+def test_test_cache_symlinked_base_is_skipped(hh):
+    """A link under the cache is never scoped through its target: the flat
+    read refuses links by lstat and the nested read must not follow one."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root = home / "Library" / "Caches" / "HogHunterDerivedData"
+        target = home / "elsewhere"
+        tree = xcode_tree(home, "HogHunter-gypzzncfdrkbjcaurhenaphjrkpw", root=target)
+        blob(target / "SDKStatCaches.noindex" / "pad", 30)
+        settle(target, 30)
+        base = cache_root / "linked-checkout"
+        base.parent.mkdir(parents=True, exist_ok=True)
+        base.symlink_to(target)
+        assert hh._test_cache_scope(base) is None
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 0, report
+        assert base.is_symlink() and tree.exists(), "the link and its target stay"
+
+
+def test_test_cache_base_gate_shrinks_to_the_root(hh):
+    """A whitelisted sibling can hold something the root's gates never saw --
+    here a nested repository inside Build/ -- and the base-level gate must
+    stop the whole-base delete: the root still goes, the base keeps the
+    sibling."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root, base, tree = _test_cache_fixture(home)
+        blob(base / "Build" / "keep-repo" / "file", 30)
+        (base / "Build" / "keep-repo" / ".git").mkdir()
+        settle(base, 30)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 1, report
+        assert not tree.exists(), "the identified root still goes"
+        assert base.exists(), "the sibling keeps the base"
+
+
+def test_test_cache_base_marker_spares_the_base(hh):
+    """A keep marker inside a whitelisted sibling is invisible to the root's
+    gates; the base-level gate walks the base and shrinks the delete."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root, base, tree = _test_cache_fixture(home)
+        (base / "SDKStatCaches.noindex" / ".janitor-keep").write_text("", encoding="utf-8")
+        settle(base, 30)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 1, report
+        assert not tree.exists(), "the identified root still goes"
+        assert base.exists(), "the marker keeps the base"
+
+
+def test_the_roots_list_names_the_test_cache(hh):
+    with fake_home(hh) as home:
+        roots = [(str(r), mode) for r, mode in hh._xcode_scratch_roots()]
+    want = (str(home / "Library" / "Caches" / "HogHunterDerivedData"), "test-cache")
+    assert want in roots, f"the test cache is one of the sweep roots; got {roots}"
+
+
 def test_hh219_a_derived_data_root_is_deleted(hh):
     with fake_home(hh) as home, gates_open(hh):
         tmp_tree = xcode_tree(home, "hh-push-dd")
