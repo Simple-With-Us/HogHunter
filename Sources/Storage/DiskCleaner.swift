@@ -1506,15 +1506,24 @@ final class DiskCleaner: @unchecked Sendable {
         if scanShouldStop() { return items.sorted { $0.bytes > $1.bytes } }
 
         // CrashReporter
+        //
+        // Children, never the folder itself:  the category's safety rule
+        // allows `Application Support/CrashReporter/*` and refuses
+        // `Application Support/CrashReporter`, so an item for the folder
+        // could never be cleaned -- it surfaced only as a safety error in
+        // every run's record.  The OS recreates whatever it still needs.
         let crashReportsURL = userHomeURL.appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
-        if scanFileExists(atPath: crashReportsURL.path) {
-            let stats = directoryStats(at: crashReportsURL)
-            if stats.bytes > 0 {
+        if scanFileExists(atPath: crashReportsURL.path),
+           let contents = try? scanContentsOfDirectory(at: crashReportsURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+            for url in contents {
+                if scanShouldStop() { break }
+                let stats = directoryStats(at: url)
+                guard stats.bytes > 0 else { continue }
                 items.append(CleanItem(
                     category: .logsAndDiagnostics,
-                    title: "Crash Reporter Logs",
-                    subtitle: "~/Library/Application Support/CrashReporter",
-                    url: crashReportsURL,
+                    title: url.lastPathComponent,
+                    subtitle: url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"),
+                    url: url,
                     bytes: stats.bytes,
                     fileCount: stats.fileCount,
                     isApproximate: stats.isApproximate,

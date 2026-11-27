@@ -1475,4 +1475,108 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertTrue(fm.fileExists(atPath: link.path))
         XCTAssertFalse(result.errors.isEmpty, "the skipped item is reported, not silent")
     }
+
+    func testScanCrashReporterOffersChildrenNotTheFolderItself() {
+        // The category's safety rule allows CrashReporter's CONTENTS and
+        // refuses the folder:  an item for the folder could never be
+        // cleaned and surfaced only as a safety error in every run's
+        // record.  The scan must offer the contents instead.
+        let fm = FileManager.default
+        let crashDir = tempDirectory
+            .appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
+        let retired = crashDir.appendingPathComponent("Retired", isDirectory: true)
+        try? fm.createDirectory(at: retired, withIntermediateDirectories: true)
+        try? "x".write(to: crashDir.appendingPathComponent("MyApp-2026-11-27.crash"), atomically: true, encoding: .utf8)
+        try? "y".write(to: retired.appendingPathComponent("old.diag"), atomically: true, encoding: .utf8)
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let crashItems = cleaner.scanLogsAndDiagnostics().filter { $0.subtitle.contains("CrashReporter") }
+        XCTAssertFalse(crashItems.isEmpty, "CrashReporter contents must be offered")
+        for item in crashItems {
+            XCTAssertNotEqual(item.url.standardizedFileURL.path, crashDir.standardizedFileURL.path,
+                              "the CrashReporter folder itself must never be an item")
+            XCTAssertTrue(cleaner.isSafeToDelete(url: item.url, category: item.category),
+                          "every offered item must pass the category's own safety rule: \(item.url.path)")
+        }
+    }
+
+    /// Scans the fixture CrashReporter directory and returns only its items.
+    private func crashReporterItems(under crashDir: URL, cleaner: DiskCleaner) -> [CleanItem] {
+        cleaner.scanLogsAndDiagnostics().filter { $0.url.path.hasPrefix(crashDir.path) }
+    }
+
+    func testCleanCrashReporterChildrenPreservesTheFolderItself() async throws {
+        let fm = FileManager.default
+        let crashDir = tempDirectory
+            .appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
+        let retired = crashDir.appendingPathComponent("Retired", isDirectory: true)
+        try fm.createDirectory(at: retired, withIntermediateDirectories: true)
+        let crashFile = crashDir.appendingPathComponent("MyApp-2026-11-27.crash")
+        let oldDiag = retired.appendingPathComponent("old.diag")
+        try "x".write(to: crashFile, atomically: true, encoding: .utf8)
+        try "y".write(to: oldDiag, atomically: true, encoding: .utf8)
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let crashItems = crashReporterItems(under: crashDir, cleaner: cleaner)
+        XCTAssertEqual(crashItems.count, 2, "one file and one subfolder are offered")
+
+        let result = await cleaner.clean(items: crashItems, createSnapshot: false, exclusions: CleanerExclusions())
+
+        XCTAssertEqual(result.itemsRemoved, 2)
+        XCTAssertTrue(fm.fileExists(atPath: crashDir.path), "the CrashReporter folder itself must survive")
+        XCTAssertFalse(fm.fileExists(atPath: crashFile.path))
+        XCTAssertFalse(fm.fileExists(atPath: retired.path))
+    }
+
+    func testCleanCrashReporterChildHonorsExclusions() async throws {
+        let fm = FileManager.default
+        let crashDir = tempDirectory
+            .appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
+        try fm.createDirectory(at: crashDir, withIntermediateDirectories: true)
+        let keep = crashDir.appendingPathComponent("keep.crash")
+        let drop = crashDir.appendingPathComponent("drop.crash")
+        try "x".write(to: keep, atomically: true, encoding: .utf8)
+        try "y".write(to: drop, atomically: true, encoding: .utf8)
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let crashItems = crashReporterItems(under: crashDir, cleaner: cleaner)
+        XCTAssertEqual(crashItems.count, 2)
+        var exclusions = CleanerExclusions()
+        exclusions.addPath(keep.path)
+
+        let result = await cleaner.clean(items: crashItems, createSnapshot: false, exclusions: exclusions)
+
+        XCTAssertEqual(result.itemsRemoved, 1, "the excluded child is skipped")
+        XCTAssertTrue(fm.fileExists(atPath: keep.path), "an excluded crash report survives")
+        XCTAssertFalse(fm.fileExists(atPath: drop.path))
+    }
+
+    func testCleanCrashReporterChildSymlinkWithEscapingTargetIsRefused() async throws {
+        // A link inside CrashReporter whose target lives outside the
+        // category's scope must not smuggle that target into the clean:
+        // the refusal that used to fire on the folder itself now guards
+        // every child the scan offers.
+        let fm = FileManager.default
+        let outside = tempDirectory.appendingPathComponent("Elsewhere", isDirectory: true)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        let secret = outside.appendingPathComponent("secret.txt")
+        try Data("important".utf8).write(to: secret)
+        let crashDir = tempDirectory
+            .appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
+        try fm.createDirectory(at: crashDir, withIntermediateDirectories: true)
+        let link = crashDir.appendingPathComponent("offload")
+        try fm.createSymbolicLink(at: link, withDestinationURL: outside)
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let crashItems = crashReporterItems(under: crashDir, cleaner: cleaner)
+        XCTAssertEqual(crashItems.count, 1, "the link itself is offered as a child")
+        XCTAssertTrue(crashItems[0].isSymlink)
+
+        let result = await cleaner.clean(items: crashItems, createSnapshot: false, exclusions: CleanerExclusions())
+
+        XCTAssertEqual(result.itemsRemoved, 0, "a link whose target escapes the category scope deletes nothing")
+        XCTAssertTrue(result.errors.contains { $0.contains("symlink target") }, "the escape is recorded, not silent")
+        XCTAssertTrue(fm.fileExists(atPath: secret.path), "the outside target survives")
+        XCTAssertTrue(fm.fileExists(atPath: link.path), "the link itself survives")
+    }
 }
