@@ -387,12 +387,15 @@ def build_status(
     # number in the scheduler state, so read it from there rather than running
     # another df on a host that is already loaded.
     #
-    # The thresholds are the same keys and the same defaults evaluate_hits
-    # uses, so the headline and the watch's own threshold hits can never
-    # disagree about whether the disk is low.
+    # The thresholds are the owner's reclaim posture: the janitor floors he
+    # configured (crit, then pressure as the low line).  The resource_watch
+    # keys are the fallback for a config that carries only those.  Reading
+    # the watch's 25/15 defaults here made the panel report "ok" at 40 GB
+    # free while the owner's own floors called 45 GB critical.
     rw_cfg = cfg.get("resource_watch", {})
-    crit_gb = float(rw_cfg.get("disk_free_crit_gb", 15))
-    warn_gb = float(rw_cfg.get("disk_free_warn_gb", 25))
+    janitor_cfg = cfg.get("janitor", {})
+    crit_gb = float(janitor_cfg.get("crit_free_gib", rw_cfg.get("disk_free_crit_gb", 15)))
+    warn_gb = float(janitor_cfg.get("pressure_free_gib", rw_cfg.get("disk_free_warn_gb", 25)))
     disk: dict[str, Any] = {"free_gb": None, "health": "unknown"}
     raw_free = store.scheduler_state().get("prev_disk_free_gb")
     if raw_free is not None:

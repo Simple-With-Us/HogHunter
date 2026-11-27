@@ -2039,12 +2039,20 @@ class TestLegacyFullSteps(unittest.TestCase):
         self.assertEqual((status, reason), (StepStatus.SKIPPED, "node-gyp build in progress"))
         ran.assert_not_called()
 
-    def test_package_caches_wait_for_a_build(self) -> None:
+    def test_package_caches_run_during_a_build_but_not_during_their_own_install(self) -> None:
+        """A build does not read the npm/pnpm/yarn caches; the install gates do
+        the protecting.  The build gate made the steps permanent no-ops on a
+        host that builds all day (live skips 2026-11-27)."""
         engine = self.engine(OnlyMatching("xcodebuild"))
         with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.work.run_process") as ran:
             for step in (engine._npm_cache, engine._pnpm_store, engine._yarn_cache):
                 _freed, reason, status = step()
-                self.assertEqual((status, reason), (StepStatus.SKIPPED, "skipped: xcodebuild is running"))
+                self.assertEqual(status, StepStatus.RAN, (step, reason))
+        self.assertEqual(ran.call_count, 3)
+        engine = self.engine(OnlyMatching("npm (install"))
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.work.run_process") as ran:
+            _freed, reason, status = engine._npm_cache()
+            self.assertEqual((status, reason), (StepStatus.SKIPPED, "npm install in progress"))
         ran.assert_not_called()
 
     def test_npx_folder_is_kept_while_a_process_runs_from_it(self) -> None:

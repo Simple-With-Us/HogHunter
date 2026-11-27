@@ -489,6 +489,44 @@ class TestLockSkip(unittest.TestCase):
         self.assertTrue(all(s.step_id == "janitor_worktree_retire" for s in record.steps))
 
 
+class TestPackageCachesGateOnTheirOwnInstalls(unittest.TestCase):
+    """npm/pnpm/yarn caches are read by their own installs, not by xcodebuild.
+    The build gate made these steps permanent no-ops on a host that builds
+    all day (live skips 2026-11-27: 'xcodebuild is running' on every tick)."""
+
+    def _run_step(self, step_id, install_running):
+        from vacuum.engine import StepStatus, VacuumEngine
+
+        cfg = load_config()
+        engine = VacuumEngine(cfg, Path("/tmp"))
+        with patch.object(sys, "platform", "darwin"), \
+                patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), \
+                patch.object(VacuumEngine, "_tool_command", return_value="/usr/bin/true"), \
+                patch.object(VacuumEngine, "_install_running", return_value=install_running), \
+                patch.object(VacuumEngine, "_build_running", return_value="xcodebuild is running"), \
+                patch.object(VacuumEngine, "_pgrep_f", return_value=True), \
+                patch("vacuum.engine.work.run_process") as run_proc:
+            _freed, reason, status = engine._dispatch(step_id, False, "cheap", {}, "normal", False)
+        return status, reason, run_proc
+
+    def test_a_build_alone_no_longer_skips_the_package_caches(self):
+        from vacuum.engine import StepStatus
+
+        for step_id in ("npm_cache", "pnpm_store", "yarn_cache"):
+            status, reason, run_proc = self._run_step(step_id, install_running=False)
+            self.assertEqual(status, StepStatus.RAN, (step_id, reason))
+            self.assertTrue(run_proc.called, step_id)
+
+    def test_the_own_install_gate_still_skips_the_package_caches(self):
+        from vacuum.engine import StepStatus
+
+        for step_id in ("npm_cache", "pnpm_store", "yarn_cache"):
+            status, reason, run_proc = self._run_step(step_id, install_running=True)
+            self.assertEqual(status, StepStatus.SKIPPED, (step_id, reason))
+            self.assertIn("install in progress", reason)
+            self.assertFalse(run_proc.called, step_id)
+
+
 class TestDryRun(unittest.TestCase):
     def test_destructive_step_skipped_in_dry_run(self):
         from unittest.mock import patch
@@ -545,9 +583,24 @@ class TestHealth(unittest.TestCase):
         self.assertEqual(status["disk"]["free_gb"], 5.9)
 
     def test_a_low_disk_reports_degraded_health(self):
-        status = self._status_with_disk(20.0)
+        """Below the pressure floor but above critical reads acute."""
+        status = self._status_with_disk(60.0)
         self.assertEqual(status["health"], "degraded")
         self.assertEqual(status["disk"]["health"], "acute")
+
+    def test_a_disk_below_the_owner_crit_floor_reports_critical(self):
+        """The owner's janitor floors call 45 GiB critical, so the live 40.23 GiB
+        reading (2026-11-27) must never render as ok/healthy again."""
+        status = self._status_with_disk(40.23)
+        self.assertEqual(status["health"], "critical")
+        self.assertEqual(status["disk"]["health"], "critical")
+
+    def test_between_pressure_and_low_floors_the_disk_reads_ok(self):
+        """90 GiB is below the 100 GiB reclaim trigger but above the 80 GiB
+        pressure floor: reclaiming, not an emergency."""
+        status = self._status_with_disk(90.0)
+        self.assertEqual(status["health"], "healthy")
+        self.assertEqual(status["disk"]["health"], "ok")
 
     def test_a_roomy_disk_leaves_health_alone(self):
         status = self._status_with_disk(120.0)
@@ -1001,6 +1054,22 @@ class TestHogHunterReclaimStep(_EngineHome):
             freed, _reason, status = self.engine._janitor_cache_reclaim({"disk_free_gb": 12.0}, "normal", dry_run=False)
         self.assertEqual((freed, status), (69_000_000, StepStatus.RAN))
         self.assertIn("--budget-sec=600", run.call_args.args[0])
+        self.assertIn("--band=full", run.call_args.args[0], "12 GiB free is under the 80 GiB pressure floor")
+
+    def test_the_reclaim_band_follows_the_configured_pressure_floor(self):
+        """At or below the pressure floor the reclaim takes the full band; above
+        it (but below the low floor) it stays cheap.  The floors are the
+        owner's configured disk posture, so the band must drift with them."""
+        self.fake_cleaner()
+        for free, want in ((90.0, "--band=cheap"), (79.9, "--band=full"), (40.23, "--band=full")):
+            with patch("vacuum.engine._run_in_own_group", return_value=(0, _report(), "", False)) as run:
+                self.engine._janitor_cache_reclaim({"disk_free_gb": free}, "normal", dry_run=False)
+            self.assertIn(want, run.call_args.args[0], free)
+        self.cfg.setdefault("janitor", {})["pressure_free_gib"] = 20
+        engine = self.engine.__class__(self.cfg, home=self.home, disk_free=lambda: 0)
+        with patch("vacuum.engine._run_in_own_group", return_value=(0, _report(), "", False)) as run:
+            engine._janitor_cache_reclaim({"disk_free_gb": 40.23}, "normal", dry_run=False)
+        self.assertIn("--band=cheap", run.call_args.args[0], "a lowered floor moves the band with it")
 
     def test_the_disk_reclaim_step_runs_even_under_extreme_load(self):
         """The load guard that opened this step is gone.  Skipping the disk reclaim

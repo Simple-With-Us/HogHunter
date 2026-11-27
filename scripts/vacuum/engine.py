@@ -906,9 +906,9 @@ class VacuumEngine:
             return 0, "npm not installed", StepStatus.SKIPPED
         if self._install_running("npm (install|ci|update|prune)"):
             return 0, self._skip_busy("npm install in progress"), StepStatus.SKIPPED
-        busy = self._build_running()
-        if busy:
-            return 0, f"skipped: {busy}", StepStatus.SKIPPED
+        # Only an npm install reads this cache.  A running xcodebuild does
+        # not, and on a host that builds all day the build gate made this
+        # step a permanent no-op.
         work.run_process([npm, "cache", "clean", "--force"], capture_output=True, timeout=300)
         npx = self.home / ".npm/_npx"
         if npx.is_symlink() or not npx.is_dir():
@@ -925,9 +925,9 @@ class VacuumEngine:
             return 0, "pnpm not installed", StepStatus.SKIPPED
         if self._install_running("pnpm (install|update|add|import|dlx|link)"):
             return 0, self._skip_busy("pnpm install in progress"), StepStatus.SKIPPED
-        busy = self._build_running()
-        if busy:
-            return 0, f"skipped: {busy}", StepStatus.SKIPPED
+        # Only a pnpm install reads this store.  A running xcodebuild does
+        # not, and on a host that builds all day the build gate made this
+        # step a permanent no-op.
         work.run_process(["pnpm", "store", "prune"], capture_output=True, timeout=300)
         return 0, "pnpm store pruned", StepStatus.RAN
 
@@ -936,9 +936,9 @@ class VacuumEngine:
             return 0, "yarn not installed", StepStatus.SKIPPED
         if self._install_running("yarn (install|add|upgrade|up|remove)|yarn$"):
             return 0, self._skip_busy("yarn install in progress"), StepStatus.SKIPPED
-        busy = self._build_running()
-        if busy:
-            return 0, f"skipped: {busy}", StepStatus.SKIPPED
+        # Only a yarn install reads this cache.  A running xcodebuild does
+        # not, and on a host that builds all day the build gate made this
+        # step a permanent no-op.
         work.run_process(["yarn", "cache", "clean"], capture_output=True, timeout=300)
         return 0, "yarn cache cleaned", StepStatus.RAN
 
@@ -1429,15 +1429,19 @@ class VacuumEngine:
             # measured.
             return 0, "disk sample unavailable; skipping cache reclaim", StepStatus.SKIPPED
         free_gib = float(sample.get("disk_free_gb", 999))
-        low = float(self.cfg.get("janitor", {}).get("low_free_gib", 80))
+        janitor_cfg = self.cfg.get("janitor", {})
+        low = float(janitor_cfg.get("low_free_gib", 80))
         if free_gib >= low:
             return 0, f"free {free_gib:.0f}G above {low:.0f}G threshold", StepStatus.SKIPPED
         if dry_run:
             return 0, "would reclaim caches", StepStatus.SKIPPED
-        # The cheap band is the safe tier.  The semi-safe tier (snapshots,
-        # device support, simulator runtimes) stays behind the engine's own
-        # calm-band gate, so it is not widened here.
-        band = "cheap"
+        # The band follows the configured floors: at or below the pressure
+        # floor the disk is under pressure, so the reclaim takes the full
+        # band.  The semi-safe and expensive tiers still sit behind the
+        # engine's own calm-band gate and each rule's free-space line, and
+        # the work stays budget-bounded whatever the band.
+        pressure_floor = float(janitor_cfg.get("pressure_free_gib", 65))
+        band = "full" if free_gib <= pressure_floor else "cheap"
         return self._hoghunter_reclaim(band)
 
     def _install_running(self, pattern: str) -> bool:
