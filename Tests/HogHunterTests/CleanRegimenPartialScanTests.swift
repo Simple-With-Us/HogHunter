@@ -183,6 +183,22 @@ final class CleanRegimenPartialScanTests: XCTestCase {
                       "a zero-item, all-error clean is recorded as exactly that")
     }
 
+    func testPartialRetryPanelHonorsLaterCompletedInterval() throws {
+        let suite = "HHPartialInterval-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let now = Date()
+        let completed = now.addingTimeInterval(-30 * 60)
+        defaults.set(completed, forKey: "hoghunter.cleaner.regimen.lastRunAt")
+        defaults.set(now, forKey: "hoghunter.cleaner.regimen.lastPartialRunAt")
+        let runner = CleanRegimenRunner(now: { now }, defaults: defaults)
+        let plan = CleanRegimen(isEnabled: true, intervalHours: 4, avoidDuringBuilds: false,
+            enabledRules: ["logs"])
+        XCTAssertNil(runner.tick(regimen: plan))
+        XCTAssertEqual(runner.nextRunDate?.timeIntervalSince1970 ?? 0,
+            completed.addingTimeInterval(4 * 3600).timeIntervalSince1970, accuracy: 1)
+    }
+
     func testEnabledRulesRestrictDiscoveryCategories() {
         XCTAssertEqual(CleanRegimenRunner.scanCategories(for: ["logs"]), [.logsAndDiagnostics])
         XCTAssertEqual(CleanRegimenRunner.scanCategories(for: ["tmp-files"]), [.tempFiles])

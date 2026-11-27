@@ -1502,7 +1502,10 @@ final class DiskCleanerTests: XCTestCase {
 
     /// Scans the fixture CrashReporter directory and returns only its items.
     private func crashReporterItems(under crashDir: URL, cleaner: DiskCleaner) -> [CleanItem] {
-        cleaner.scanLogsAndDiagnostics().filter { $0.url.path.hasPrefix(crashDir.path) }
+        let prefix = crashDir.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        return cleaner.scanLogsAndDiagnostics().filter {
+            $0.url.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path + "/" == prefix
+        }
     }
 
     func testCleanCrashReporterChildrenPreservesTheFolderItself() async throws {
@@ -1569,14 +1572,38 @@ final class DiskCleanerTests: XCTestCase {
 
         let cleaner = DiskCleaner(homeDirectory: tempDirectory)
         let crashItems = crashReporterItems(under: crashDir, cleaner: cleaner)
-        XCTAssertEqual(crashItems.count, 1, "the link itself is offered as a child")
-        XCTAssertTrue(crashItems[0].isSymlink)
-
-        let result = await cleaner.clean(items: crashItems, createSnapshot: false, exclusions: CleanerExclusions())
+        XCTAssertTrue(crashItems.isEmpty, "discovery refuses links before reading their target")
+        // Independently exercise delete-time validation of a stale/manual item,
+        // even when discovery already refused the escaping target.
+        let staleItem = CleanItem(category: .logsAndDiagnostics, title: "Escaping link",
+            subtitle: link.path, url: link, bytes: 9, fileCount: 1,
+            lastModified: nil, isSelected: true, isSymlink: true)
+        let result = await cleaner.clean(items: [staleItem], createSnapshot: false, exclusions: CleanerExclusions())
 
         XCTAssertEqual(result.itemsRemoved, 0, "a link whose target escapes the category scope deletes nothing")
         XCTAssertTrue(result.errors.contains { $0.contains("symlink target") }, "the escape is recorded, not silent")
         XCTAssertTrue(fm.fileExists(atPath: secret.path), "the outside target survives")
         XCTAssertTrue(fm.fileExists(atPath: link.path), "the link itself survives")
     }
+    func testCrashReporterChildrenShareTraversalDeadline() throws {
+        let fm = FileManager.default
+        let crashDir = tempDirectory.appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
+        for index in 0..<40 {
+            let child = crashDir.appendingPathComponent("group-\(index)", isDirectory: true)
+            try fm.createDirectory(at: child, withIntermediateDirectories: true)
+            for file in 0..<20 {
+                try "x".write(to: child.appendingPathComponent("report-\(file).crash"), atomically: true, encoding: .utf8)
+            }
+        }
+        var clock: TimeInterval = 0
+        let cleaner = DiskCleaner(scanUptime: {
+            clock += 0.001
+            return clock
+        }, homeDirectory: tempDirectory)
+        let items = crashReporterItems(under: crashDir, cleaner: cleaner)
+        XCTAssertFalse(items.isEmpty)
+        XCTAssertLessThan(items.count, 40, "child walks must not each reset the root traversal deadline")
+        XCTAssertLessThan(clock, 1, "one target cap, not forty target caps or the global eight-second cap")
+    }
+
 }

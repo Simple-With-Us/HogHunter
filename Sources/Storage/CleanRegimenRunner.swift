@@ -404,7 +404,10 @@ final class CleanRegimenRunner: ObservableObject {
                 // scan backoff, and the panel says so rather than going
                 // quiet or advertising a check-time retry that will not run.
                 waitingReason = "The last scan was incomplete; the full scan tries again later."
-                nextRunDate = retry
+                let intervalNext = lastRunAt.map {
+                    $0.addingTimeInterval(regimen.effectiveIntervalHours * 3600)
+                }
+                nextRunDate = intervalNext.map { max(retry, $0) } ?? retry
             } else {
                 waitingReason = nil
                 updateNextRun(regimen: regimen, lastRunAt: lastRunAt)

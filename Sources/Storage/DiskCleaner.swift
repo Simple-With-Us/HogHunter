@@ -1515,9 +1515,20 @@ final class DiskCleaner: @unchecked Sendable {
         let crashReportsURL = userHomeURL.appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
         if scanFileExists(atPath: crashReportsURL.path),
            let contents = try? scanContentsOfDirectory(at: crashReportsURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+            // Preserve the former root walk's cap across all child measurements.
+            let budget = DirectoryTraversalBudget(deadline: scanUptime() + (Self.scanContext?.depth.targetDuration ?? 0.15), remaining: 25_000)
             for url in contents {
                 if scanShouldStop() { break }
-                let stats = directoryStats(at: url)
+                guard budget.remaining > 0, scanUptime() < budget.deadline else {
+                    markScanIncomplete()
+                    break
+                }
+                // Inspect the entry itself before directoryStats can resolve or
+                // enumerate its destination. CrashReporter links are review-only.
+                guard let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]),
+                      values.isSymbolicLink != true else { continue }
+                budget.remaining -= 1
+                let stats = directoryStats(at: url, traversalBudget: budget)
                 guard stats.bytes > 0 else { continue }
                 items.append(CleanItem(
                     category: .logsAndDiagnostics,
@@ -2952,9 +2963,19 @@ final class DiskCleaner: @unchecked Sendable {
         var isApproximate: Bool = false
     }
 
+    final class DirectoryTraversalBudget {
+        let deadline: TimeInterval
+        var remaining: Int
+        init(deadline: TimeInterval, remaining: Int) {
+            self.deadline = deadline
+            self.remaining = remaining
+        }
+    }
+
     /// Counts files and directories against the entry cap, including empty directories.
     /// Budgets are checked between filesystem calls, not kernel deadlines.
-    func directoryStats(at url: URL, maxDepth: Int = 32, fileCap: Int = 25_000) -> DirectoryStats {
+    func directoryStats(at url: URL, maxDepth: Int = 32, fileCap: Int = 25_000,
+                        traversalBudget: DirectoryTraversalBudget? = nil) -> DirectoryStats {
         let context = Self.scanContext
         let depth = min(maxDepth, context?.depth.maxDepth ?? maxDepth)
         let memoKey = "\(url.path)|\(depth)|\(fileCap)"
@@ -2968,7 +2989,7 @@ final class DiskCleaner: @unchecked Sendable {
             return stats
         }
         guard let measuredURL = scanURL(url) else { return partial() }
-        let deadline = scanUptime() + (context?.depth.targetDuration ?? 0.15)
+        let deadline = min(scanUptime() + (context?.depth.targetDuration ?? 0.15), traversalBudget?.deadline ?? .infinity)
         let keys: Set<URLResourceKey> = [.fileAllocatedSizeKey, .fileSizeKey, .isRegularFileKey,
             .isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey]
         guard let root = try? measuredURL.resourceValues(forKeys: keys) else { return partial() }
@@ -2992,13 +3013,15 @@ final class DiskCleaner: @unchecked Sendable {
             options: [], errorHandler: { _, _ in failed = true; return true }) else { return partial() }
         var visited = 0
         while !scanShouldStop() {
-            guard visited < fileCap, scanUptime() < deadline else { return partial() }
+            guard visited < fileCap, (traversalBudget?.remaining ?? 1) > 0,
+                  scanUptime() < deadline else { return partial() }
             guard let child = enumerator.nextObject() as? URL else {
                 if failed || stats.isApproximate { return partial() }
                 context?.memo[memoKey] = stats
                 return stats
             }
             visited += 1
+            traversalBudget?.remaining -= 1
             context?.remaining -= 1
             guard scanAllows(child) else { failed = true; enumerator.skipDescendants(); continue }
             guard let values = try? child.resourceValues(forKeys: keys) else { failed = true; continue }
