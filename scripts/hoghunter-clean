@@ -3529,8 +3529,13 @@ _INFO_PLIST_MAX_BYTES = 64 * 1024
 def _xcode_scratch_roots() -> list[Path]:
     """Where xcode-scratch looks: direct children only.  Read at call time so a
     test's fake home is used.  ~/Library/Developer/Xcode/DerivedData is
-    xcode-artifacts' job and is not repeated here."""
-    return [XCODE_SCRATCH_ROOT, HOME / ".clutch" / "derived-data"]
+    xcode-artifacts' job and is not repeated here.  The app's own test-build
+    cache (xcodegen-post points this checkout's default DerivedData at
+    ~/Library/Caches/HogHunterDerivedData) joined the sweep 2026-11-27 after
+    17 GB of repeated full-suite runs sat idle there -- measured Jay's Mac,
+    2026-11-27, disk at 23 GB free."""
+    return [XCODE_SCRATCH_ROOT, HOME / ".clutch" / "derived-data",
+            HOME / "Library" / "Caches" / "HogHunterDerivedData"]
 
 
 def _workspace_path_refusal(tree: Path) -> str | None:
@@ -3747,8 +3752,8 @@ def _partial_xcode_scratch_reportable(tree: Path) -> bool:
 
 
 def rule_xcode_scratch() -> list[Candidate]:
-    """Derived data a build left through -derivedDataPath, in /private/tmp or
-    in Clutch's derived-data folder.
+    """Derived data a build left through -derivedDataPath, in /private/tmp, in
+    Clutch's derived-data folder, or in the app's own test-build cache.
 
     A root that passes every gate in _xcode_scratch_refusal is a delete,
     checked again right before it, and main lets it through only at

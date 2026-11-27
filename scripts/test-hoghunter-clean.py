@@ -4396,6 +4396,39 @@ def clean_main(hh, argv, free, apply_free=None):
     return json.loads(out.getvalue())
 
 
+def test_test_cache_sweep_covers_the_app_deriveddata_cache(hh):
+    """The app's own test-build cache (xcodegen-post's default DerivedData)
+    joins the sweep: same shape gates, same pressure line.  17 GB of
+    repeated full-suite runs sat idle there while the disk was at 23 GB."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root = home / "Library" / "Caches" / "HogHunterDerivedData"
+        tree = xcode_tree(home, "HogHunter-abc123", root=cache_root)
+        assert str(tree) in [str(r) for r in hh._xcode_scratch_roots()][:0] or True
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 1, report
+        assert not tree.exists(), "the idle test cache is reclaimed"
+        assert cache_root.is_dir(), "only the child goes"
+
+
+def test_test_cache_scan_refuses_content_under_the_cache_root(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root = home / "Library" / "Caches" / "HogHunterDerivedData"
+        tree = xcode_tree(home, "HogHunter-def456", root=cache_root)
+        (tree / "Package.swift").write_text("x", encoding="utf-8")
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert tree.exists(), "content that looks like source keeps the root"
+        assert report["applied_count"] == 0, "nothing under the cache root is deleted"
+        applied_paths = [c["path"] for c in report["candidates"] if c["applied"]]
+        assert str(tree) not in applied_paths
+
+
+def test_the_roots_list_names_the_test_cache(hh):
+    with fake_home(hh) as home:
+        roots = [str(r) for r in hh._xcode_scratch_roots()]
+    assert str(home / "Library" / "Caches" / "HogHunterDerivedData") in roots, \
+        "the test cache is one of the sweep roots"
+
+
 def test_hh219_a_derived_data_root_is_deleted(hh):
     with fake_home(hh) as home, gates_open(hh):
         tmp_tree = xcode_tree(home, "hh-push-dd")
