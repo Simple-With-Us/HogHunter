@@ -277,18 +277,25 @@ struct ServerTabContent: View {
     /// again and changes nothing there.  Pull to refresh does the same.
     private var refreshSection: some View {
         Section {
-            Button {
-                Task { await model.refreshServer() }
-            } label: {
-                HStack {
-                    Label("Refresh Server Reading", systemImage: "arrow.clockwise")
-                    Spacer()
-                    if model.isRefreshingServer {
-                        ProgressView()
+            TimelineView(.periodic(from: Date(), by: 1)) { context in
+                Button {
+                    Task { await model.refreshServer() }
+                } label: {
+                    HStack {
+                        Label("Refresh Server Reading", systemImage: "arrow.clockwise")
+                        Spacer()
+                        if model.isRefreshingServer {
+                            ProgressView()
+                        }
                     }
                 }
+                .disabled(model.isRefreshingServer || !model.controlsReachable || model.serverRefreshRetryRemaining(now: context.date) > 0)
+                if let countdown = CompanionFreshness.countdownText(remainingSeconds: model.serverRefreshRetryRemaining(now: context.date)) {
+                    Label(countdown, systemImage: "clock")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
-            .disabled(model.isRefreshingServer || !model.controlsReachable)
             if let note = model.serverRefreshNote {
                 Text(note)
                     .font(.footnote)
@@ -767,7 +774,7 @@ struct ServerOverviewSummary: View {
     var body: some View {
         Section {
             if server.resolvedState() == .stale {
-                Text("This reading is stale. The numbers are what the Mac last saw \(ServerFormat.age(server.generatedAt)).")
+                Text("This reading is stale.\u{00A0} The numbers are what the Mac last saw \(ServerFormat.age(server.generatedAt)).")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

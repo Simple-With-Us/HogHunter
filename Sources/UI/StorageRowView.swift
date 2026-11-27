@@ -31,6 +31,10 @@ struct StorageRowView: View {
         .onTapGesture { onToggle() }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
+        .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+        .accessibilityHint(isExpanded ? "Collapses the breakdown" : "Expands the breakdown")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { onToggle() }
     }
 
     // MARK: - Summary
@@ -50,7 +54,7 @@ struct StorageRowView: View {
                         // told two similar apps apart.
                         .truncationMode(.middle)
                     if usage.isRunning {
-                        Text("running")
+                        Text("Running")
                             .font(.system(size: 9, weight: .medium))
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 4)
@@ -199,8 +203,9 @@ struct StorageRowView: View {
 
     // MARK: - Accessibility
 
-    private var accessibilityLabel: String {
+    var accessibilityLabel: String {
         var pieces = [usage.name, HogFormat.memory(usage.totalBytes), "on disk"]
+        if usage.isRunning { pieces.append("running now") }
         // Spell the reason out, do not just say "flagged": VoiceOver has no
         // hover tooltip to fall back on, so this is the only place the
         // explanation reaches a screen-reader user at all.

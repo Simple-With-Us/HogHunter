@@ -153,7 +153,7 @@ extension CompanionSnapshotBuilder {
         webhookURL: String,
         webhookStatus: String?,
         notificationsDenied: Bool,
-        appearance: AppearanceChoice = .system,
+        appearance: AppearanceChoice = .light,
         backgroundRefreshInterval: Double = 10,
         menuBarLabelMode: MenuBarLabelMode = .machinePercent,
         sort: HogSort = .cpu,

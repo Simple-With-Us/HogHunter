@@ -330,6 +330,21 @@ struct VPSToolStatus: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// What the Mac knows about a server process's scheduling priority.
+///
+/// The collector reads `nice` from /proc, but a missing field is a real
+/// outcome (the stat read can fail), not priority zero — and Hog Hunter's
+/// own tame target is exactly 19, so any other reported value, however
+/// high, is not a process this tool tamed.
+enum ServerTameState: Equatable, Sendable {
+    /// The collector reported no priority.
+    case unknown
+    /// At Hog Hunter's tame target (nice 19).
+    case tamed
+    /// A reported priority other than 19.
+    case untamed
+}
+
 /// One process on the server, as the server's own collector saw it.
 ///
 /// The collector reads executable identity and the kernel's tick counters
@@ -373,7 +388,27 @@ struct VPSProcess: Codable, Equatable, Sendable, Identifiable {
         self.protectionReason = protectionReason
     }
 
-    var isTamed: Bool { (nice ?? 0) >= 15 }
+    /// Whether this process sits at Hog Hunter's tame target.  Unknown when
+    /// the collector reported no priority.
+    var tameState: ServerTameState {
+        guard let nice else { return .unknown }
+        return nice == 19 ? .tamed : .untamed
+    }
+
+    /// The tamed flag the phone renders, from the same state the action
+    /// filter and the Mac badge use, so the caption and the offered labels
+    /// can never disagree.
+    var phoneIsTamed: Bool? {
+        switch tameState {
+        case .tamed: return true
+        case .untamed: return false
+        case .unknown: return nil
+        }
+    }
+
+    /// True only at the tame target, matching `tameState`, so this flag can
+    /// never disagree with the action filter, the badges, or the caption.
+    var isTamed: Bool { tameState == .tamed }
 
     func can(action: String) -> Bool {
         guard let bootID, !bootID.isEmpty, let startTime, startTime > 0 else { return false }

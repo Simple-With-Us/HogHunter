@@ -135,6 +135,35 @@ final class FlaggedIssuesTests: XCTestCase {
         XCTAssertFalse(agedExtra?.message.contains("not answering") == true)
     }
 
+    func testEveryDiskAndServerIssueCarriesAnAction() {
+        let store = HogStore(
+            historyURL: URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("flagged-actions-\(UUID().uuidString).sqlite")
+        )
+        // 88% used: the medium Mac warning that used to have no button.
+        store.setDiskSpaceForTest(DiskSpace(freeBytes: 60 * 1024 * 1024 * 1024, totalBytes: 500 * 1024 * 1024 * 1024))
+        let snap = VPSStatusSnapshot(
+            generatedAt: "2026-10-25T12:00:00Z",
+            host: "fleet-hetzner-nbg1",
+            devices: [
+                "root": VPSDevice(mount: "/", freeBytes: 5 * 1024 * 1024 * 1024, note: "root"),
+                "fleet_extra": VPSDevice(mount: "/mnt/fleet-extra", freeBytes: 8 * 1024 * 1024 * 1024, note: "extra")
+            ]
+        )
+        let issues = FlaggedIssueEvaluator.evaluate(macStore: store, vpsSnapshot: snap, vpsError: nil, vpsConfigured: true)
+        XCTAssertEqual(issues.first { $0.id == "mac.disk.warning" }?.actionTitle, "Clean")
+        for id in ["server.disk.root.critical", "server.disk.extra.critical"] {
+            XCTAssertEqual(issues.first { $0.id == id }?.actionTitle, "Retry", "\(id) must offer the existing re-read")
+        }
+        // The phone mapping reuses the same titles behind its existing opt-ins.
+        let allowed = CompanionServerStatusBuilder.IssueActionsAllowed(quit: true, clean: true, refresh: true)
+        let phone = CompanionServerStatusBuilder.issues(issues, allowed: allowed)
+        XCTAssertEqual(phone.first { $0.id == "mac.disk.warning" }?.action, "clean")
+        XCTAssertEqual(phone.first { $0.id == "server.disk.root.critical" }?.action, "retry")
+        XCTAssertTrue(CompanionServerStatusBuilder.issues(issues, allowed: .none).allSatisfy { $0.action == nil },
+                      "no opt-in, no phone action")
+    }
+
     func testEvaluatorPrioritizesIssues() {
         let store = HogStore(
             historyURL: URL(fileURLWithPath: NSTemporaryDirectory())

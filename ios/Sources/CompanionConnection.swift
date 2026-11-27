@@ -71,6 +71,12 @@ enum CompanionConnection {
         case 403:
             throw CompanionClientError.forbidden(json?["error"] as? String ?? "The Mac did not allow this iPhone.")
         case 429:
+            // Two 429s share this route: "the Mac is already showing a
+            // pairing request" (no retryAfter) and the per-address throttle
+            // (with one).  Only the throttle waits out a window.
+            if let wait = json?["retryAfter"] as? Int {
+                throw CompanionClientError.throttled(retryAfter: wait)
+            }
             throw CompanionClientError.busy
         case 404:
             throw CompanionClientError.forbidden("This Mac's copy of Hog Hunter is too old to approve phones.\u{00A0} Update it, or type the code from Settings.")

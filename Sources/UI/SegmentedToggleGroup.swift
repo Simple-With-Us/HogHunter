@@ -37,8 +37,13 @@ struct SegmentedToggleGroup<Selection: Hashable, Label: View>: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                // VoiceOver must hear which segment is on: a plain Button
+                // reads every segment alike, so the selected one carries
+                // the selected trait and the group is announced as a group.
+                .accessibilityAddTraits(selection == option ? [.isButton, .isSelected] : [.isButton])
             }
         }
+        .accessibilityElement(children: .contain)
         .padding(1)
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)

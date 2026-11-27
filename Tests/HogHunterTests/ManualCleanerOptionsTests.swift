@@ -81,6 +81,23 @@ final class ManualCleanerOptionsTests: XCTestCase {
         XCTAssertEqual(store.exclusions.excludedPaths, [home.appendingPathComponent("from-phone").path])
     }
 
+    func testSetTierResetsTheExtremeAcknowledgement() {
+        let suite = "hh-tier-ack-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = DiskCleanerStore(historyStore: CleanupHistoryStore(inMemory: true),
+                                     exclusionsDefaults: defaults, manualScanOnly: true)
+        store.setTier(.extreme)
+        store.acknowledgedExtremeDisclaimer = true
+        store.setTier(.standard)
+        XCTAssertFalse(store.acknowledgedExtremeDisclaimer, "leaving Extreme must void the acknowledgement")
+        store.setTier(.extreme)
+        XCTAssertFalse(store.acknowledgedExtremeDisclaimer, "returning to Extreme must ask again")
+        store.acknowledgedExtremeDisclaimer = true
+        store.setTier(.extreme)
+        XCTAssertTrue(store.acknowledgedExtremeDisclaimer, "re-selecting the same tier is a no-op")
+    }
+
     func testDashboardOptionsInvalidateReportWithoutStartingAnotherScan() async throws {
         let suite = "hh174-manual-cleaner-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

@@ -37,6 +37,7 @@ struct StorageView: View {
     @State private var sortAscending: Bool = false
     @State private var filter: StorageFilter = .all
     @State private var expandedUsageId: String?
+    @State private var showMaintainRunConfirmation = false
 
     private let embeddedInPanel: Bool
     private let isTabActive: Bool
@@ -115,6 +116,12 @@ struct StorageView: View {
         .navigationTitle("Storage — Hog Hunter")
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Hog Hunter Storage — top apps and disk cleaner")
+        .sheet(isPresented: $showMaintainRunConfirmation) {
+            MaintainRunConfirmationView {
+                showMaintainRunConfirmation = false
+                maintainStore.runNow("full")
+            } cancel: { showMaintainRunConfirmation = false }
+        }
     }
 
     // MARK: - Header
@@ -175,7 +182,7 @@ struct StorageView: View {
     private var maintainHeaderControls: some View {
         HStack(spacing: 8) {
             Button("Run Now") {
-                maintainStore.runNow("full")
+                showMaintainRunConfirmation = true
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
@@ -276,7 +283,7 @@ struct StorageView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Try again") { store.refresh() }
+                Button("Try Again") { store.refresh() }
             }
         }
     }
@@ -314,10 +321,11 @@ struct StorageView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if store.apps.isEmpty {
-                Text("Scanning…")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // The status row above owns progress and errors; the list stays
+                // empty until there are rows to show.  A second "Scanning…"
+                // here doubled the status row's spinner, and read as progress
+                // on a failed scan too.
+                Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {

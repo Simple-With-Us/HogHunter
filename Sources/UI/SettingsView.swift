@@ -7,7 +7,7 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var store: HogStore
 
-    @AppStorage(HogStore.Key.appearance) private var appearance = AppearanceChoice.system.rawValue
+    @AppStorage(HogStore.Key.appearance) private var appearance = AppearanceChoice.light.rawValue
 
     /// The tab the window comes back to.  Stored, so Settings reopens where
     /// the owner left it instead of always on General; the iPhone opt-ins
@@ -255,7 +255,7 @@ private struct StartupSettingsTab: View {
 private struct ThemeSettingsTab: View {
     @EnvironmentObject private var store: HogStore
 
-    @AppStorage(HogStore.Key.appearance) private var appearance = AppearanceChoice.system.rawValue
+    @AppStorage(HogStore.Key.appearance) private var appearance = AppearanceChoice.light.rawValue
 
     var body: some View {
         Form {
@@ -265,7 +265,7 @@ private struct ThemeSettingsTab: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                Text("System is the default, so Hog Hunter follows the Mac.\u{00A0} Light and Dark pin it either way, here and in the menu bar panel.")
+                Text("Light is the default when no theme is stored.\u{00A0} System follows the Mac, and Light and Dark pin it either way, here and in the menu bar panel.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -657,7 +657,7 @@ private struct MaintenanceSettingsContent: View {
             }
 
             Section("Custom Maintenance Scripts & Plugins") {
-                Text("Extend Hog Hunter with custom shell scripts, Python utilities, or observed system jobs. Place executables in ~/.hoghunter/maintenance/scripts/ or register them in registry.json.")
+                Text("Extend Hog Hunter with custom shell scripts, Python utilities, or observed system jobs.\u{00A0} Place executables in ~/.hoghunter/maintenance/scripts/ or register them in registry.json.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -448,7 +448,9 @@ final class MaintainStoreInjectionTests: XCTestCase {
         let task = try XCTUnwrap(store.runNow("full"))
         await task.value
         XCTAssertFalse(store.isRunningNow)
-        XCTAssertEqual(store.lastError, "Cleaning could not be started.\u{00A0} Check Logs for details.")
+        let refused = try XCTUnwrap(store.lastError)
+        XCTAssertTrue(refused.hasPrefix("Cleaning could not be started.\u{00A0} Check Logs for details.\u{00A0} (run "), refused)
+        XCTAssertTrue(refused.hasSuffix(")"), refused)
     }
 
     func testTheDefaultLauncherAlsoRefusesToChangeAStep() async throws {
@@ -498,8 +500,10 @@ final class MaintainStoreInjectionTests: XCTestCase {
         let task = try XCTUnwrap(store.runNow("full"))
         await task.value
         XCTAssertFalse(store.isRunningNow)
-        XCTAssertEqual(store.lastError, "Cleaning could not be started.\u{00A0} Check Logs for details.")
-        XCTAssertFalse(store.lastError?.contains("boom") ?? true, "the raw error must not leak")
+        let startFailure = try XCTUnwrap(store.lastError)
+        XCTAssertTrue(startFailure.hasPrefix("Cleaning could not be started.\u{00A0} Check Logs for details.\u{00A0} (run "), startFailure)
+        XCTAssertTrue(startFailure.hasSuffix(")"), startFailure)
+        XCTAssertFalse(startFailure.contains("boom"), "the raw error must not leak")
         XCTAssertNotNil(store.runNow("full"), "the store is free to run again")
     }
 

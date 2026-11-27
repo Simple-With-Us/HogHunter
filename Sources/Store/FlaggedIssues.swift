@@ -180,7 +180,8 @@ enum FlaggedIssueEvaluator {
                     message: "\(formatBytes(disk.freeBytes)) free (\(Int(disk.usedFraction * 100))% used).",
                     priority: .medium,
                     host: .mac,
-                    category: .disk
+                    category: .disk,
+                    actionTitle: "Clean"
                 ))
             }
         }
@@ -196,7 +197,8 @@ enum FlaggedIssueEvaluator {
                     message: "\(drive.name): \(formatBytes(avail)) remaining (\(Int(usedPct))% used).",
                     priority: .high,
                     host: .mac,
-                    category: .disk
+                    category: .disk,
+                    actionTitle: "Clean"
                 ))
             } else if usedPct >= 85 {
                 issues.append(FlaggedIssue(
@@ -205,7 +207,8 @@ enum FlaggedIssueEvaluator {
                     message: "\(drive.name): \(formatBytes(avail)) remaining (\(Int(usedPct))% used).",
                     priority: .medium,
                     host: .mac,
-                    category: .disk
+                    category: .disk,
+                    actionTitle: "Clean"
                 ))
             }
         }
@@ -322,7 +325,8 @@ enum FlaggedIssueEvaluator {
                             message: "\(formatBytes(root.freeBytes)) free on \(snap.host).\(staleNote)",
                             priority: .critical,
                             host: .server,
-                            category: .disk
+                            category: .disk,
+                            actionTitle: "Retry"
                         ))
                     } else if root.freeBytes < lowFreeDiskFloor || (root.usedFraction ?? 0) >= 0.90 {
                         issues.append(FlaggedIssue(
@@ -331,7 +335,8 @@ enum FlaggedIssueEvaluator {
                             message: "\(formatBytes(root.freeBytes)) remaining (\(Int((root.usedFraction ?? 0) * 100))% used).\(staleNote)",
                             priority: .high,
                             host: .server,
-                            category: .disk
+                            category: .disk,
+                            actionTitle: "Retry"
                         ))
                     } else if (root.usedFraction ?? 0) >= 0.85 {
                         issues.append(FlaggedIssue(
@@ -340,7 +345,8 @@ enum FlaggedIssueEvaluator {
                             message: "\(Int((root.usedFraction ?? 0) * 100))% used on \(snap.host).\(staleNote)",
                             priority: .medium,
                             host: .server,
-                            category: .disk
+                            category: .disk,
+                            actionTitle: "Retry"
                         ))
                     }
                 }
@@ -354,7 +360,8 @@ enum FlaggedIssueEvaluator {
                             message: "\(formatBytes(extra.freeBytes)) remaining on extra volume.\(staleNote)",
                             priority: .critical,
                             host: .server,
-                            category: .disk
+                            category: .disk,
+                            actionTitle: "Retry"
                         ))
                     } else if extra.freeBytes < 30 * 1024 * 1024 * 1024 || (extra.usedFraction ?? 0) >= 0.90 {
                         issues.append(FlaggedIssue(
@@ -363,7 +370,8 @@ enum FlaggedIssueEvaluator {
                             message: "\(formatBytes(extra.freeBytes)) free on /mnt/fleet-extra.\(staleNote)",
                             priority: .high,
                             host: .server,
-                            category: .disk
+                            category: .disk,
+                            actionTitle: "Retry"
                         ))
                     } else if (extra.usedFraction ?? 0) >= 0.85 {
                         issues.append(FlaggedIssue(
@@ -372,7 +380,8 @@ enum FlaggedIssueEvaluator {
                             message: "\(Int((extra.usedFraction ?? 0) * 100))% used on /mnt/fleet-extra.\(staleNote)",
                             priority: .medium,
                             host: .server,
-                            category: .disk
+                            category: .disk,
+                            actionTitle: "Retry"
                         ))
                     }
                 }
@@ -386,7 +395,8 @@ enum FlaggedIssueEvaluator {
                             message: "\(String(format: "%.0f%%", cpu.pct)) CPU, 1m load \(String(format: "%.1f", cpu.load1)) (\(cpu.cores) cores).\(staleNote)",
                             priority: .high,
                             host: .server,
-                            category: .cpu
+                            category: .cpu,
+                            actionTitle: "Retry"
                         ))
                     } else if cpu.pct >= 70.0 {
                         issues.append(FlaggedIssue(
@@ -395,7 +405,8 @@ enum FlaggedIssueEvaluator {
                             message: "\(String(format: "%.0f%%", cpu.pct)) CPU on \(snap.host).\(staleNote)",
                             priority: .medium,
                             host: .server,
-                            category: .cpu
+                            category: .cpu,
+                            actionTitle: "Retry"
                         ))
                     }
                 }
@@ -409,7 +420,8 @@ enum FlaggedIssueEvaluator {
                             message: "\(String(format: "%.0f%%", mem.usedPercentage)) used (\(formatBytes(mem.availableBytes)) available).\(staleNote)",
                             priority: .high,
                             host: .server,
-                            category: .memory
+                            category: .memory,
+                            actionTitle: "Retry"
                         ))
                     } else if mem.usedPercentage >= 80.0 {
                         issues.append(FlaggedIssue(
@@ -418,7 +430,8 @@ enum FlaggedIssueEvaluator {
                             message: "\(String(format: "%.0f%%", mem.usedPercentage)) used on \(snap.host).\(staleNote)",
                             priority: .medium,
                             host: .server,
-                            category: .memory
+                            category: .memory,
+                            actionTitle: "Retry"
                         ))
                     }
                 }
@@ -430,7 +443,8 @@ enum FlaggedIssueEvaluator {
                         message: "\(String(format: "%.0f%%", swap.usedPercentage)) swap used (\(formatBytes(swap.usedBytes))).\(staleNote)",
                         priority: .high,
                         host: .server,
-                        category: .memory
+                        category: .memory,
+                        actionTitle: "Retry"
                     ))
                 }
 
@@ -443,7 +457,8 @@ enum FlaggedIssueEvaluator {
                             message: "Essential service is stopped on \(snap.host).\(staleNote)",
                             priority: .high,
                             host: .server,
-                            category: .service
+                            category: .service,
+                            actionTitle: "Retry"
                         ))
                     }
                 }

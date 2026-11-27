@@ -116,6 +116,9 @@ final class CompanionModel {
     private func adoptSnapshot(_ fetched: CompanionSnapshot) {
         snapshot = fetched
         snapshotVersionMismatch = (fetched.version != CompanionService.version)
+        // A fresh snapshot in hand retires any poll throttle, including one
+        // left over from a previous pairing.
+        snapshotRetryAvailableAt = nil
     }
 
     /// Record a `hoghunter://clean` link as asking for the confirmation now.
@@ -296,9 +299,16 @@ final class CompanionModel {
             // Jittered so a roomful of phones paired to one Mac do not poll
             // in lockstep and hammer the same second.
             while !Task.isCancelled {
-                await self?.refresh()
-                let jitter = Double.random(in: 2.5...3.5)
-                try? await Task.sleep(for: .seconds(jitter))
+                // Throttled (429): sleep until the Mac lifts it instead of
+                // polling through the window.  The header shows the wait.
+                let wait = await self?.snapshotRetryRemaining() ?? 0
+                if wait > 0 {
+                    try? await Task.sleep(for: .seconds(TimeInterval(wait)))
+                } else {
+                    await self?.refresh()
+                    let jitter = Double.random(in: 2.5...3.5)
+                    try? await Task.sleep(for: .seconds(jitter))
+                }
             }
         }
     }
@@ -370,6 +380,10 @@ final class CompanionModel {
 
     func submitCode() async {
         guard case let .code(peerID) = phase, let mac = discovered.first(where: { $0.id == peerID }) else { return }
+        if codeRetryRemaining() > 0 {
+            codeError = CompanionFreshness.countdownText(remainingSeconds: codeRetryRemaining()).map { "\($0)." } ?? codeError
+            return
+        }
         let token = CompanionToken.normalizeCode(codeDraft)
         guard token.count == 8 else {
             codeError = "Enter the 8 character code from Hog Hunter Settings on your Mac."
@@ -386,9 +400,11 @@ final class CompanionModel {
             adoptSnapshot(next)
             codeError = nil
             codeFailure = nil
+            codeRetryAvailableAt = nil
             pairingDismissed = false
             phase = .live
         } catch {
+            noteCodeThrottled(error)
             codeError = Self.codeMessage(for: error)
             codeFailure = Self.failureKind(for: error)
         }
@@ -441,6 +457,10 @@ final class CompanionModel {
             codeFailure = .other
             return
         }
+        if codeRetryRemaining() > 0 {
+            codeError = CompanionFreshness.countdownText(remainingSeconds: codeRetryRemaining()).map { "\($0)." } ?? codeError
+            return
+        }
         codeError = nil
         codeFailure = nil
         isWaitingForApproval = true
@@ -451,8 +471,10 @@ final class CompanionModel {
             saved = SavedMac(peerID: mac.id, name: mac.name, token: token)
             persistSaved()
             adoptSnapshot(next)
+            codeRetryAvailableAt = nil
             phase = .live
         } catch {
+            noteCodeThrottled(error)
             codeError = Self.approvalMessage(for: error)
             codeFailure = Self.failureKind(for: error)
         }
@@ -696,6 +718,10 @@ final class CompanionModel {
     /// the read lands.  Needs no confirmation: it changes nothing anywhere.
     func refreshServer() async {
         guard !isRefreshingServer else { return }
+        if serverRefreshRetryRemaining() > 0 {
+            serverRefreshNote = CompanionFreshness.countdownText(remainingSeconds: serverRefreshRetryRemaining()).map { "\($0)." }
+            return
+        }
         isRefreshingServer = true
         defer { isRefreshingServer = false }
         serverRefreshNote = nil
@@ -711,6 +737,11 @@ final class CompanionModel {
         let started = ContinuousClock.now
         do {
             let response = try await CompanionConnection.triggerServerRefresh(endpoint: endpoint, token: saved.token, useTLS: isUsingTLS(for: saved))
+            if let wait = response.retryAfter, wait > 0 {
+                serverRefreshRetryAvailableAt = Date().addingTimeInterval(TimeInterval(wait))
+            } else if response.isStarted {
+                serverRefreshRetryAvailableAt = nil
+            }
             if !response.isStarted { serverRefreshNote = response.displayText }
         } catch {
             serverRefreshNote = "The Mac did not answer, so the server was not refreshed.\u{00A0} \(Self.describe(error))"
@@ -1303,6 +1334,7 @@ final class CompanionModel {
         } catch CompanionClientError.unauthorized {
             remoteConnectError = "Pairing Code does not match this Mac."
         } catch let error as CompanionClientError where error != .badResponse {
+            noteCodeThrottled(error)
             remoteConnectError = Self.approvalMessage(for: error)
         } catch {
             guard !Task.isCancelled else { return }
@@ -1368,7 +1400,30 @@ final class CompanionModel {
     private var refreshGeneration: Int = 0
     /// When the on-screen snapshot last refreshed.  A failing poll leaves
     /// the old snapshot up; past 30s the status says Reconnecting instead.
-    private var lastSuccessfulRefresh = Date.distantPast
+    private(set) var lastSuccessfulRefresh = Date.distantPast
+    /// When a throttled pairing/code try may be retried (429), if any.
+    private(set) var codeRetryAvailableAt: Date?
+    /// When a throttled server refresh may be retried (429), if any.
+    private(set) var serverRefreshRetryAvailableAt: Date?
+    /// When a throttled snapshot poll may be retried (429), if any.
+    private(set) var snapshotRetryAvailableAt: Date?
+
+    func codeRetryRemaining(now: Date = Date()) -> Int {
+        CompanionFreshness.remainingSeconds(until: codeRetryAvailableAt, now: now)
+    }
+
+    func serverRefreshRetryRemaining(now: Date = Date()) -> Int {
+        CompanionFreshness.remainingSeconds(until: serverRefreshRetryAvailableAt, now: now)
+    }
+
+    func snapshotRetryRemaining(now: Date = Date()) -> Int {
+        CompanionFreshness.remainingSeconds(until: snapshotRetryAvailableAt, now: now)
+    }
+
+    private func noteCodeThrottled(_ error: Error) {
+        guard case .throttled(let seconds) = error as? CompanionClientError, seconds > 0 else { return }
+        codeRetryAvailableAt = Date().addingTimeInterval(TimeInterval(seconds))
+    }
 
     func refresh() async {
         guard let saved, let endpoint = activeEndpoint(for: saved) else {
@@ -1413,6 +1468,12 @@ final class CompanionModel {
                 // report as a code problem rather than a connectivity one.
                 codeFailure = .unauthorized
                 phase = .code(saved.peerID)
+            }
+        } catch CompanionClientError.throttled(let seconds) {
+            // Told to wait (429): the poll loop sleeps until then.  Not a
+            // disconnect, so the status line keeps what it said.
+            if seconds > 0 {
+                snapshotRetryAvailableAt = Date().addingTimeInterval(TimeInterval(seconds))
             }
         } catch {
             if snapshot == nil {

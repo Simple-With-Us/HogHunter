@@ -170,6 +170,20 @@ final class CompanionServerRefreshRouteTests: XCTestCase {
         XCTAssertEqual(CompanionServerRefreshResponse.answer(status: 429, body: Data()).status, "throttled")
         XCTAssertFalse(CompanionServerRefreshResponse.answer(status: 500, body: Data()).isStarted)
     }
+
+    func testAnUntyped429CarriesTheFullIntervalAsRetryAfter() {
+        let answer = CompanionServerRefreshResponse.answer(status: 429, body: Data())
+        XCTAssertEqual(answer.status, "throttled")
+        XCTAssertEqual(answer.retryAfter, Int(CompanionServerRefresh.minimumInterval))
+        XCTAssertEqual(answer.retryAfter, 15)
+    }
+
+    func testATyped429KeepsItsOwnRetryAfter() throws {
+        let body = try XCTUnwrap(#"{"status":"throttled","retryAfter":7}"#.data(using: .utf8))
+        let answer = CompanionServerRefreshResponse.answer(status: 429, body: body)
+        XCTAssertEqual(answer.status, "throttled")
+        XCTAssertEqual(answer.retryAfter, 7)
+    }
 }
 
 final class CompanionServerRefreshActionTests: XCTestCase {
@@ -326,6 +340,16 @@ final class CompanionIssueActionTests: XCTestCase {
         var noRefresh = all
         noRefresh.refresh = false
         XCTAssertEqual(CompanionServerStatusBuilder.issues(macIssues, allowed: noRefresh).map(\.actionKind), [.clean, .quit, nil, nil])
+    }
+
+    func testAServerDiskRetryMapsToTheRefreshKindOnlyWithItsOptIn() {
+        // The evaluator now puts Retry on every server issue; on the phone it
+        // is only the refresh (re-read) kind, behind the server-status opt-in.
+        let serverDisk = [issue("server.disk.root.critical", host: .server, action: "Retry")]
+        XCTAssertEqual(CompanionServerStatusBuilder.issues(serverDisk, allowed: all).map(\.actionKind), [.retry])
+        var noRefresh = all
+        noRefresh.refresh = false
+        XCTAssertEqual(CompanionServerStatusBuilder.issues(serverDisk, allowed: noRefresh).map(\.actionKind), [nil])
     }
 
     func testAButtonOnTheWrongHostDoesNotMap() {
