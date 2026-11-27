@@ -3595,11 +3595,98 @@ def _xcode_shape_refusal(tree: Path) -> str | None:
 _INFO_PLIST_MAX_BYTES = 64 * 1024
 
 
-def _xcode_scratch_roots() -> list[Path]:
-    """Where xcode-scratch looks: direct children only.  Read at call time so a
-    test's fake home is used.  ~/Library/Developer/Xcode/DerivedData is
-    xcode-artifacts' job and is not repeated here."""
-    return [XCODE_SCRATCH_ROOT, HOME / ".clutch" / "derived-data"]
+def _xcode_scratch_roots() -> list[tuple[Path, str]]:
+    """Where xcode-scratch looks, and how each root is read.  Read at call
+    time so a test's fake home is used.  "flat" walks the root's children;
+    "test-cache" is the app's own DerivedData cache, whose checkout bases
+    need the two-level read in _test_cache_scope.
+    ~/Library/Developer/Xcode/DerivedData is xcode-artifacts' job and is not
+    repeated here.  The app's own test-build cache joined the sweep
+    2026-11-27 after 17 GB of repeated full-suite runs sat idle there --
+    measured Jay's Mac, 2026-11-27, disk at 23 GB free.  xcodegen-post points
+    each checkout at ~/Library/Caches/HogHunterDerivedData/<checkout>-<hash>
+    as its DerivedDataCustomLocation, and a plain workspace build appends
+    Xcode's own HogHunter-<hash> below that, so the DerivedData root sits two
+    levels under the cache folder.  An explicit -derivedDataPath run (Release,
+    CI) pins the root where it is told and never lands in the cache."""
+    return [(XCODE_SCRATCH_ROOT, "flat"),
+            (HOME / ".clutch" / "derived-data", "flat"),
+            (HOME / "Library" / "Caches" / "HogHunterDerivedData", "test-cache")]
+
+
+def _test_cache_scope(child: Path) -> tuple[Path, Path, str | None] | None:
+    """Where one checkout base under the app's test cache keeps its
+    DerivedData root, or None when nothing here is Xcode's.  Returns
+    (identify, delete, refusal): the gates run on `identify` -- the real
+    build tree, whose freshness the base's ever-refreshing module caches
+    would otherwise hide -- and `delete` names what may go: the whole base
+    when everything beside the root is whitelisted build noise, else the
+    root alone.  A base child that is itself a DerivedData root (an explicit
+    -derivedDataPath run) identifies at the base.  A symlinked base is
+    skipped outright: the flat read refuses links by lstat, and the nested
+    read must not follow one into the target it points at."""
+    if child.is_symlink():
+        return None
+    if _xcode_shape_refusal(child) is None:
+        return child, child, None
+    inner = []
+    try:
+        for g in sorted(child.iterdir()):
+            if g.is_dir() and _xcode_shape_refusal(g) is None:
+                inner.append(g)
+        if len(inner) != 1:
+            return None
+        strays = [e.name for e in child.iterdir()
+                  if e != inner[0] and e.name not in _DERIVED_DATA_ENTRIES]
+    except OSError:
+        return None
+    return (inner[0], child if not strays else inner[0], None)
+
+
+def _test_cache_base_delete_refusal(base: Path) -> str | None:
+    """Why the whole checkout base may not go even though its DerivedData
+    root passed every gate, or None.  The base has no info.plist, so the
+    identity gate is skipped; every delete-safety gate of
+    _xcode_scratch_refusal runs on the base itself -- ownership, mount,
+    protected paths, idleness, precious content, keep markers, nested
+    repositories, open handles -- so a sibling the root's gates never saw
+    still stops a whole-base sweep.  A refusal here shrinks the delete to
+    the identified root alone."""
+    s = str(base)
+    try:
+        st = os.lstat(s)
+        root_dev = os.lstat(base.parent).st_dev
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            return "not a real directory"
+        if st.st_uid != os.getuid():
+            return "owned by someone else"
+        if st.st_dev != root_dev:
+            return "a mount point"
+    except OSError as exc:
+        return f"could not read it ({type(exc).__name__})"
+    if is_forbidden(s) or has_keep_sentinel(s):
+        return "protected"
+    idle_min, idle_label = _xcode_scratch_idle_min(read_disk_free())
+    if (changed_age_min(s) < idle_min
+            or _shallow_newest_age_min(base) < idle_min
+            or _deep_newest_age_min(base) < idle_min):
+        return f"used in the last {idle_label}"
+    precious = _derived_data_precious_refusal(base)
+    if precious:
+        return precious
+    marker = holds_keep_sentinel(s, probe_timeout(60.0))
+    if marker.found or not marker.known:
+        return "holds a keep marker, or the look failed"
+    nested = regenerable_clones_only(base)
+    if nested:
+        return nested
+    if tree_in_use(s):
+        return "held open"
+    if repo_has_process_cwd(s):
+        return "a process runs from it"
+    if process_names_path(s) or process_names_path(base.name):
+        return "a running process names it"
+    return None
 
 
 def _workspace_path_refusal(tree: Path) -> str | None:
@@ -3816,8 +3903,8 @@ def _partial_xcode_scratch_reportable(tree: Path) -> bool:
 
 
 def rule_xcode_scratch() -> list[Candidate]:
-    """Derived data a build left through -derivedDataPath, in /private/tmp or
-    in Clutch's derived-data folder.
+    """Derived data a build left through -derivedDataPath, in /private/tmp, in
+    Clutch's derived-data folder, or in the app's own test-build cache.
 
     A root that passes every gate in _xcode_scratch_refusal is a delete,
     checked again right before it, and main lets it through only at
@@ -3826,14 +3913,80 @@ def rule_xcode_scratch() -> list[Candidate]:
     """
     cands: list[Candidate] = []
     deadline = rule_deadline()
-    for root in _xcode_scratch_roots():
+    for root, mode in _xcode_scratch_roots():
         try:
             if root.is_symlink() or not root.is_dir():
                 continue
-            children = sorted(root.iterdir())
         except OSError:
             continue
-        for tree in children:
+        if mode == "test-cache":
+            # The app's test cache: each checkout keeps its DerivedData root
+            # at the base or one level down (see _xcode_scratch_roots and
+            # _test_cache_scope); the gates run on the identified root and
+            # the delete may cover the whole base.
+            try:
+                cache_children = sorted(root.iterdir())
+            except OSError:
+                continue
+            for child in cache_children:
+                if rule_out_of_time(deadline):
+                    return cands
+                scope = _test_cache_scope(child)
+                if scope is None:
+                    continue
+                identify, delete, base_refusal = scope
+                size = dir_bytes(str(delete))
+                if size < MIN_CANDIDATE_BYTES:
+                    continue
+                refusal = base_refusal or _xcode_scratch_refusal(identify)
+                if refusal is None and delete != identify:
+                    # The whole base was offered; it must pass its own
+                    # delete-safety gates, and a refusal shrinks the delete
+                    # to the identified root alone.
+                    base_refusal = _test_cache_base_delete_refusal(delete)
+                    if base_refusal is not None:
+                        delete = identify
+                        size = dir_bytes(str(delete))
+                        if size < MIN_CANDIDATE_BYTES:
+                            continue
+                if refusal is not None:
+                    cands.append(Candidate(
+                        category="xcode-scratch", path=str(delete), bytes=size,
+                        reason=f"Xcode derived data in {root} (report only; {refusal})",
+                        tier="ask-first", op="report",
+                    ))
+                    continue
+
+                def recheck(delete: Path = delete, child: Path = child,
+                            identity=path_identity(str(delete))) -> str | None:
+                    if path_identity(str(delete)) != identity:
+                        return "the path now holds something else"
+                    scope = _test_cache_scope(child)
+                    if scope is None:
+                        return "the checkout base no longer holds Xcode's tree"
+                    identify2, delete2, _ = scope
+                    if delete2 != identify2:
+                        base_ref = _test_cache_base_delete_refusal(delete2)
+                        if base_ref is not None:
+                            delete2 = identify2
+                    if delete2 != delete:
+                        return "the delete scope changed"
+                    return _xcode_scratch_refusal(identify2)
+
+                cands.append(Candidate(
+                    category="xcode-scratch", path=str(delete), bytes=size,
+                    reason="Xcode DerivedData root, idle 24h+, nothing holds or names it",
+                    tier="safe", op="delete",
+                    # The recheck walks for a marker right before the delete.
+                    keep_verdict=MarkerVerdict(False, True),
+                    recheck=recheck,
+                ))
+            continue
+        try:
+            trees = sorted(root.iterdir())
+        except OSError:
+            continue
+        for tree in trees:
             if rule_out_of_time(deadline):
                 return cands
             if _xcode_shape_refusal(tree) is not None:
