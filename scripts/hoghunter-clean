@@ -3526,18 +3526,48 @@ def _xcode_shape_refusal(tree: Path) -> str | None:
 _INFO_PLIST_MAX_BYTES = 64 * 1024
 
 
-def _xcode_scratch_roots() -> list[tuple[Path, bool]]:
-    """Where xcode-scratch looks, and whether the root itself is one tree.
-    Read at call time so a test's fake home is used.
+def _xcode_scratch_roots() -> list[tuple[Path, str]]:
+    """Where xcode-scratch looks, and how each root is read.  Read at call
+    time so a test's fake home is used.  "flat" walks the root's children;
+    "test-cache" is the app's own DerivedData cache, whose checkout bases
+    need the two-level read in _test_cache_scope.
     ~/Library/Developer/Xcode/DerivedData is xcode-artifacts' job and is not
     repeated here.  The app's own test-build cache joined the sweep
     2026-11-27 after 17 GB of repeated full-suite runs sat idle there --
-    measured Jay's Mac, 2026-11-27, disk at 23 GB free -- and because
-    xcodegen-post sets it as the DerivedDataCustomLocation, Xcode writes the
-    DerivedData structure directly into that folder: the ROOT is the tree."""
-    return [(XCODE_SCRATCH_ROOT, False),
-            (HOME / ".clutch" / "derived-data", False),
-            (HOME / "Library" / "Caches" / "HogHunterDerivedData", True)]
+    measured Jay's Mac, 2026-11-27, disk at 23 GB free.  xcodegen-post points
+    each checkout at ~/Library/Caches/HogHunterDerivedData/<checkout>-<hash>
+    as its DerivedDataCustomLocation, and a plain workspace build appends
+    Xcode's own HogHunter-<hash> below that, so the DerivedData root sits two
+    levels under the cache folder.  An explicit -derivedDataPath run (Release,
+    CI) pins the root where it is told and never lands in the cache."""
+    return [(XCODE_SCRATCH_ROOT, "flat"),
+            (HOME / ".clutch" / "derived-data", "flat"),
+            (HOME / "Library" / "Caches" / "HogHunterDerivedData", "test-cache")]
+
+
+def _test_cache_scope(child: Path) -> tuple[Path, Path, str | None] | None:
+    """Where one checkout base under the app's test cache keeps its
+    DerivedData root, or None when nothing here is Xcode's.  Returns
+    (identify, delete, refusal): the gates run on `identify` -- the real
+    build tree, whose freshness the base's ever-refreshing module caches
+    would otherwise hide -- and `delete` names what may go: the whole base
+    when everything beside the root is whitelisted build noise, else the
+    root alone.  A base child that is itself a DerivedData root (an explicit
+    -derivedDataPath run) identifies at the base."""
+    if _xcode_shape_refusal(child) is None:
+        return child, child, None
+    inner = []
+    try:
+        for g in sorted(child.iterdir()):
+            if g.is_dir() and _xcode_shape_refusal(g) is None:
+                inner.append(g)
+        if len(inner) != 1:
+            return None
+        strays = [e.name for e in child.iterdir()
+                  if e != inner[0] and e.name not in _DERIVED_DATA_ENTRIES]
+    except OSError:
+        return None
+    return (inner[0], child if not strays else inner[0], None)
 
 
 def _workspace_path_refusal(tree: Path) -> str | None:
@@ -3764,17 +3794,60 @@ def rule_xcode_scratch() -> list[Candidate]:
     """
     cands: list[Candidate] = []
     deadline = rule_deadline()
-    for root, root_is_tree in _xcode_scratch_roots():
+    for root, mode in _xcode_scratch_roots():
         try:
             if root.is_symlink() or not root.is_dir():
                 continue
-            if root_is_tree:
-                # The app's test cache is itself one DerivedData root
-                # (DerivedDataCustomLocation): evaluate the folder, not its
-                # children, which are Build/ and Xcode's own caches.
-                trees = [root]
-            else:
-                trees = sorted(root.iterdir())
+        except OSError:
+            continue
+        if mode == "test-cache":
+            # The app's test cache: each checkout keeps its DerivedData root
+            # at the base or one level down (see _xcode_scratch_roots and
+            # _test_cache_scope); the gates run on the identified root and
+            # the delete may cover the whole base.
+            try:
+                cache_children = sorted(root.iterdir())
+            except OSError:
+                continue
+            for child in cache_children:
+                if rule_out_of_time(deadline):
+                    return cands
+                scope = _test_cache_scope(child)
+                if scope is None:
+                    continue
+                identify, delete, base_refusal = scope
+                size = dir_bytes(str(delete))
+                if size < MIN_CANDIDATE_BYTES:
+                    continue
+                refusal = base_refusal or _xcode_scratch_refusal(identify)
+                if refusal is not None:
+                    cands.append(Candidate(
+                        category="xcode-scratch", path=str(delete), bytes=size,
+                        reason=f"Xcode derived data in {root} (report only; {refusal})",
+                        tier="ask-first", op="report",
+                    ))
+                    continue
+
+                def recheck(delete: Path = delete, child: Path = child,
+                            identity=path_identity(str(delete))) -> str | None:
+                    if path_identity(str(delete)) != identity:
+                        return "the path now holds something else"
+                    scope = _test_cache_scope(child)
+                    if scope is None or scope[1] != delete:
+                        return "the checkout base no longer holds the same tree"
+                    return _xcode_scratch_refusal(scope[0])
+
+                cands.append(Candidate(
+                    category="xcode-scratch", path=str(delete), bytes=size,
+                    reason="Xcode DerivedData root, idle 24h+, nothing holds or names it",
+                    tier="safe", op="delete",
+                    # The recheck walks for a marker right before the delete.
+                    keep_verdict=MarkerVerdict(False, True),
+                    recheck=recheck,
+                ))
+            continue
+        try:
+            trees = sorted(root.iterdir())
         except OSError:
             continue
         for tree in trees:
