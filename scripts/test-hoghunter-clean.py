@@ -4402,18 +4402,31 @@ def test_test_cache_sweep_covers_the_app_deriveddata_cache(hh):
     repeated full-suite runs sat idle there while the disk was at 23 GB."""
     with fake_home(hh) as home, gates_open(hh):
         cache_root = home / "Library" / "Caches" / "HogHunterDerivedData"
-        tree = xcode_tree(home, "HogHunter-abc123", root=cache_root)
-        assert str(tree) in [str(r) for r in hh._xcode_scratch_roots()][:0] or True
+        cache_root.mkdir(parents=True, exist_ok=True)
+        # The custom location IS the DerivedData root: Xcode writes the
+        # structure directly into it, no per-project child.
+        blob(cache_root / "Build" / "Products" / "Debug" / "App.app" / "App", 30)
+        (cache_root / "Build" / "Intermediates.noindex" / "XCBuildData").mkdir(parents=True)
+        (cache_root / "CompilationCache.noindex").mkdir()
+        (cache_root / "ModuleCache.noindex").mkdir()
+        (cache_root / "Logs" / "Build").mkdir(parents=True)
+        (cache_root / "info.plist").write_text(INFO_PLIST, encoding="utf-8")
+        settle(cache_root, 30)
+        tree = cache_root
         report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
         assert report["applied_count"] == 1, report
         assert not tree.exists(), "the idle test cache is reclaimed"
-        assert cache_root.is_dir(), "only the child goes"
+        assert (home / "Library" / "Caches").is_dir(), "only the cache root goes"
 
 
 def test_test_cache_scan_refuses_content_under_the_cache_root(hh):
     with fake_home(hh) as home, gates_open(hh):
         cache_root = home / "Library" / "Caches" / "HogHunterDerivedData"
-        tree = xcode_tree(home, "HogHunter-def456", root=cache_root)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        blob(cache_root / "Build" / "Products" / "Debug" / "App.app" / "App", 30)
+        (cache_root / "info.plist").write_text(INFO_PLIST, encoding="utf-8")
+        settle(cache_root, 30)
+        tree = cache_root
         (tree / "Package.swift").write_text("x", encoding="utf-8")
         report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
         assert tree.exists(), "content that looks like source keeps the root"
@@ -4424,9 +4437,9 @@ def test_test_cache_scan_refuses_content_under_the_cache_root(hh):
 
 def test_the_roots_list_names_the_test_cache(hh):
     with fake_home(hh) as home:
-        roots = [str(r) for r in hh._xcode_scratch_roots()]
-    assert str(home / "Library" / "Caches" / "HogHunterDerivedData") in roots, \
-        "the test cache is one of the sweep roots"
+        roots = [(str(r), flag) for r, flag in hh._xcode_scratch_roots()]
+    want = (str(home / "Library" / "Caches" / "HogHunterDerivedData"), True)
+    assert want in roots, f"the test cache is one of the sweep roots; got {roots}"
 
 
 def test_hh219_a_derived_data_root_is_deleted(hh):

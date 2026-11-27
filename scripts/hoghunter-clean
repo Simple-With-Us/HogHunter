@@ -3526,16 +3526,18 @@ def _xcode_shape_refusal(tree: Path) -> str | None:
 _INFO_PLIST_MAX_BYTES = 64 * 1024
 
 
-def _xcode_scratch_roots() -> list[Path]:
-    """Where xcode-scratch looks: direct children only.  Read at call time so a
-    test's fake home is used.  ~/Library/Developer/Xcode/DerivedData is
-    xcode-artifacts' job and is not repeated here.  The app's own test-build
-    cache (xcodegen-post points this checkout's default DerivedData at
-    ~/Library/Caches/HogHunterDerivedData) joined the sweep 2026-11-27 after
-    17 GB of repeated full-suite runs sat idle there -- measured Jay's Mac,
-    2026-11-27, disk at 23 GB free."""
-    return [XCODE_SCRATCH_ROOT, HOME / ".clutch" / "derived-data",
-            HOME / "Library" / "Caches" / "HogHunterDerivedData"]
+def _xcode_scratch_roots() -> list[tuple[Path, bool]]:
+    """Where xcode-scratch looks, and whether the root itself is one tree.
+    Read at call time so a test's fake home is used.
+    ~/Library/Developer/Xcode/DerivedData is xcode-artifacts' job and is not
+    repeated here.  The app's own test-build cache joined the sweep
+    2026-11-27 after 17 GB of repeated full-suite runs sat idle there --
+    measured Jay's Mac, 2026-11-27, disk at 23 GB free -- and because
+    xcodegen-post sets it as the DerivedDataCustomLocation, Xcode writes the
+    DerivedData structure directly into that folder: the ROOT is the tree."""
+    return [(XCODE_SCRATCH_ROOT, False),
+            (HOME / ".clutch" / "derived-data", False),
+            (HOME / "Library" / "Caches" / "HogHunterDerivedData", True)]
 
 
 def _workspace_path_refusal(tree: Path) -> str | None:
@@ -3762,14 +3764,20 @@ def rule_xcode_scratch() -> list[Candidate]:
     """
     cands: list[Candidate] = []
     deadline = rule_deadline()
-    for root in _xcode_scratch_roots():
+    for root, root_is_tree in _xcode_scratch_roots():
         try:
             if root.is_symlink() or not root.is_dir():
                 continue
-            children = sorted(root.iterdir())
+            if root_is_tree:
+                # The app's test cache is itself one DerivedData root
+                # (DerivedDataCustomLocation): evaluate the folder, not its
+                # children, which are Build/ and Xcode's own caches.
+                trees = [root]
+            else:
+                trees = sorted(root.iterdir())
         except OSError:
             continue
-        for tree in children:
+        for tree in trees:
             if rule_out_of_time(deadline):
                 return cands
             if _xcode_shape_refusal(tree) is not None:
