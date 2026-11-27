@@ -14,20 +14,38 @@ private struct ServerOverviewSummaryHeight: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
-/// The height of the Overview's single scroll viewport, measured offscreen
-/// in layout tests so it can never silently collapse to 0pt in a short window
-/// (Kody's finding on PR #398) while still growing with the window per Jay's
-/// "Grow" decision.  The cards, captions, and activity rows all live inside
-/// this one scroll, so the viewport — not a summary split — is what grows.
-struct OverviewScrollViewportHeight: PreferenceKey {
+/// The height the Overview summary's content actually occupies, measured offscreen
+/// in layout tests so the summary can never silently collapse to 0pt in a short window
+/// (Kody's finding on PR #398) while still growing with the window per Jay's "Grow" decision.
+struct OverviewSummaryHeight: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
-/// The height the Overview's activity rows actually occupy, measured
-/// offscreen in layout tests so the rows can never silently clip to a
-/// fixed strip with their own scrollbar again.
-struct OverviewActivityHeight: PreferenceKey {
+/// How the Overview pages (Mac and server) split their height between the summary
+/// and the activity list.
+///
+/// The summary is as tall as its content, up to a share of the page that grows with
+/// the window, and it scrolls only when the content is taller than that.  Activity
+/// takes the rest and always keeps a usable height.  The Mac page used to force its
+/// content to 110% of the page so the summary always scrolled and left a blank strip
+/// under it, and the server page capped the summary at 45% whatever the window was.
+enum OverviewSplit {
+    static let summaryShare: CGFloat = 0.58
+    static let summaryFloor: CGFloat = 200
+    static let activityFloor: CGFloat = 140
+
+    /// The height of the summary region for a page `available` tall whose summary
+    /// content measured `content` (0 until it has been measured).
+    static func summaryHeight(available: CGFloat, content: CGFloat) -> CGFloat {
+        let cap = max(summaryFloor, min(available * summaryShare, available - activityFloor))
+        guard content > 0 else { return cap }
+        return min(content, cap)
+    }
+}
+
+/// The height of the Mac Overview summary's content, measured where it is laid out.
+private struct OverviewContentHeight: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
@@ -62,7 +80,8 @@ struct HogHunterPanel: View {
     @State private var driveReadAttempted = false
     @State private var mountedDrivePage = 0
     @State private var pendingQuit: HogRow?
-    @State private var serverOverviewSummaryHeight: CGFloat = 180
+    @State private var serverOverviewSummaryHeight: CGFloat = 0
+    @State private var overviewContentHeight: CGFloat = 0
     @State private var hasVisitedStorage = false
     @State private var hasVisitedNetwork = false
     @State private var storageSubTab: StorageSubTab = .apps
@@ -347,12 +366,13 @@ struct HogHunterPanel: View {
                             Color.clear.preference(key: ServerOverviewSummaryHeight.self, value: summary.size.height)
                         })
                 }
-                .frame(height: min(serverOverviewSummaryHeight, geometry.size.height * 0.45))
+                .frame(height: OverviewSplit.summaryHeight(available: geometry.size.height,
+                                                           content: serverOverviewSummaryHeight))
                 .onPreferenceChange(ServerOverviewSummaryHeight.self) { height in
                     if height > 0 { serverOverviewSummaryHeight = height }
                 }
                 Text("Top Activity").font(.headline)
-                serverActivityColumn()
+                serverActivityColumn
                     .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
                 ServerControlOutcomeView(control: serverActivityControl, font: .caption)
             }
@@ -439,36 +459,57 @@ struct HogHunterPanel: View {
     }
 
     private var overview: some View {
-        // One scroll region for the whole page: the cards, captions, and
-        // activity rows all travel together, instead of the summary hogging
-        // the height with its own scrollbar above a clipped process strip
-        // with two more.
-        ScrollView(.vertical) {
+        GeometryReader { outer in
             VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 10) {
-                    cpuHistoryCard
-                    Meter(title: "Memory", value: store.pulse.memoryPercent,
-                          caption: store.memorySizeCaption,
-                          severity: Severity.forPressure(store.pulse.pressure),
-                          accessibilityDetail: store.memoryCaption)
-                        .frame(width: 260)
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(alignment: .top, spacing: 10) {
+                            cpuHistoryCard
+                            Meter(title: "Memory", value: store.pulse.memoryPercent,
+                                  caption: store.memorySizeCaption,
+                                  severity: Severity.forPressure(store.pulse.pressure),
+                                  accessibilityDetail: store.memoryCaption)
+                                .frame(width: 260)
+                            if store.pulse.swapTotalBytes > 0 {
+                                // The server Overview already shows swap as a meter with used and
+                                // total; the Mac only had a "Swapped" pill with no total.
+                                Meter(title: "Swap",
+                                      value: Double(store.pulse.swapUsedBytes) / Double(store.pulse.swapTotalBytes) * 100,
+                                      caption: "\(HogFormat.memory(store.pulse.swapUsedBytes)) of \(HogFormat.memory(store.pulse.swapTotalBytes)) swapped",
+                                      severity: Severity.forPressure(store.pulse.pressure))
+                                    .frame(width: 200)
+                            }
+                        }
+                        .frame(height: 94)
+                        pillRow(memoryPills + thermalPills)
+                        capacityCards
+                        if !store.maintain.vpsStore.configuredHost.isEmpty {
+                            serverStrip
+                        }
+                        captions
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .background(
+                        GeometryReader { content in
+                            Color.clear.preference(key: OverviewContentHeight.self, value: content.size.height)
+                        }
+                    )
                 }
-                .frame(height: 94)
-                pillRow(memoryPills + thermalPills)
-                capacityCards
-                if !store.maintain.vpsStore.configuredHost.isEmpty {
-                    serverStrip
+                .frame(height: OverviewSplit.summaryHeight(available: outer.size.height,
+                                                           content: overviewContentHeight))
+                .onPreferenceChange(OverviewContentHeight.self) { height in
+                    if height > 0 { overviewContentHeight = height }
                 }
-                captions
-                activitySection(unified: true)
+                .background(
+                    GeometryReader { region in
+                        Color.clear.preference(key: OverviewSummaryHeight.self, value: region.size.height)
+                    }
+                )
+                .accessibilityLabel("Overview summary, scroll for capacity and captions")
+                activitySection
+                    .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
             }
         }
-        .background(
-            GeometryReader { viewport in
-                Color.clear.preference(key: OverviewScrollViewportHeight.self, value: viewport.size.height)
-            }
-        )
-        .accessibilityLabel("Overview, scroll for activity")
     }
 
     /// Shared by the menu bar and the dashboard.  Clicking it reads the Mac again.
@@ -521,7 +562,7 @@ struct HogHunterPanel: View {
             }
             .frame(height: 240)
             .accessibilityLabel("Resource summary, scroll for more drives")
-            activitySection()
+            activitySection
                 .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
 
             // Panel action feedback.  The dashboard shows notices and errors
@@ -1098,11 +1139,7 @@ struct HogHunterPanel: View {
         store.maintain.vpsStore.snapshot?.processes ?? []
     }
 
-    /// When `unified`, the rows size their own block inside the page's one
-    /// scroll instead of clipping to a fixed strip with their own
-    /// scrollbars.  The quick view and the server overview keep the strip:
-    /// they are fixed-height surfaces with no page scroll of their own.
-    private func activitySection(unified: Bool = false) -> some View {
+    private var activitySection: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text("Top Activity")
@@ -1113,24 +1150,19 @@ struct HogHunterPanel: View {
             // Mac on the left half, server on the right half, so the two
             // lists read against each other with no toggle in between.
             HStack(alignment: .top, spacing: 6) {
-                macActivityColumn(unified: unified)
+                macActivityColumn
                 if !store.maintain.vpsStore.configuredHost.isEmpty {
-                    serverActivityColumn(unified: unified)
+                    serverActivityColumn
                 }
             }
-            .frame(maxHeight: unified ? nil : .infinity, alignment: .topLeading)
-            .background(
-                GeometryReader { rows in
-                    Color.clear.preference(key: OverviewActivityHeight.self, value: rows.size.height)
-                }
-            )
+            .frame(maxHeight: .infinity, alignment: .topLeading)
 
             ServerControlOutcomeView(control: serverActivityControl)
         }
         .frame(minHeight: 100)
     }
 
-    private func macActivityColumn(unified: Bool = false) -> some View {
+    private var macActivityColumn: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Image(systemName: "laptopcomputer")
@@ -1143,56 +1175,48 @@ struct HogHunterPanel: View {
                     .font(.system(size: 8.5))
                     .foregroundStyle(.secondary)
             }
-            if unified {
-                macActivityRows
-            } else {
-                ScrollView(.vertical) {
-                    macActivityRows
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 3) {
+                    ForEach(store.rows) { row in
+                        HStack(spacing: 6) {
+                            Text(row.name)
+                                .font(.system(size: 9.5, weight: .medium))
+                                .lineLimit(1)
+                            Spacer()
+                            if row.cpuPercent.isFinite && row.cpuPercent >= 100 {
+                                // The number stays black; this small mark is the only
+                                // color, and only on a row using a full core or more (the per-core
+                                // value, the same rule Severity.forProcessCpu calls elevated).
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.yellow)
+                                    .help("Using a full CPU core or more")
+                                    .accessibilityLabel("High CPU")
+                            }
+                            Text(HogFormat.cpu(row.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount))
+                                .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(.primary)
+                            Text(HogFormat.memory(row.memoryBytes))
+                                .font(.system(size: 9).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            MacProcessActions(row: row, store: store, showsStopButton: true)
+                        }
+                    }
+                    if store.rows.isEmpty {
+                        Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                .accessibilityLabel("Mac activity, scroll for more processes")
             }
+            .accessibilityLabel("Mac activity, scroll for more processes")
         }
         .padding(5)
-        .frame(maxWidth: .infinity, maxHeight: unified ? nil : .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
     }
 
-    private var macActivityRows: some View {
-        LazyVStack(alignment: .leading, spacing: 3) {
-            ForEach(store.rows) { row in
-                HStack(spacing: 6) {
-                    Text(row.name)
-                        .font(.system(size: 9.5, weight: .medium))
-                        .lineLimit(1)
-                    Spacer()
-                    if row.cpuPercent.isFinite && row.cpuPercent >= 100 {
-                        // The number stays black; this small mark is the only
-                        // color, and only on a row using a full core or more (the per-core
-                        // value, the same rule Severity.forProcessCpu calls elevated).
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 8))
-                            .foregroundStyle(.yellow)
-                            .help("Using a full CPU core or more")
-                            .accessibilityLabel("High CPU")
-                    }
-                    Text(HogFormat.cpu(row.cpuPercent, scale: store.cpuScale, coreCount: store.pulse.coreCount))
-                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(.primary)
-                    Text(HogFormat.memory(row.memoryBytes))
-                        .font(.system(size: 9).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    MacProcessActions(row: row, store: store, showsStopButton: true)
-                }
-            }
-            if store.rows.isEmpty {
-                Text(store.hasBaseline ? "Nothing heavy right now." : "Measuring…")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private func serverActivityColumn(unified: Bool = false) -> some View {
+    private var serverActivityColumn: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Image(systemName: "server.rack")
@@ -1205,61 +1229,53 @@ struct HogHunterPanel: View {
                     .font(.system(size: 8.5))
                     .foregroundStyle(.secondary)
             }
-            if unified {
-                serverActivityRows
-            } else {
-                ScrollView(.vertical) {
-                    serverActivityRows
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 3) {
+                    ForEach(serverProcesses) { process in
+                        HStack(spacing: 6) {
+                            Text(process.name)
+                                .font(.system(size: 9.5, weight: .medium))
+                                .lineLimit(1)
+                            if let container = process.container, !container.isEmpty {
+                                Text(container)
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            if process.cpuPercent.isFinite && process.cpuPercent >= 100 {
+                                // The number stays black; this small mark is the only
+                                // color, and only on a row using a full core or more (the per-core
+                                // value, the same rule Severity.forProcessCpu calls elevated).
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(.yellow)
+                                    .help("Using a full CPU core or more")
+                                    .accessibilityLabel("High CPU")
+                            }
+                            Text(String(format: "%.0f%%", process.cpuPercent))
+                                .font(.system(size: 9, weight: .semibold).monospacedDigit())
+                                .foregroundStyle(.primary)
+                            Text(process.memoryBytes.map { HogFormat.memory(UInt64(max(0, $0))) } ?? "—")
+                                .font(.system(size: 9).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            ServerProcessActions(process: process, host: store.maintain.vpsStore.configuredHost,
+                                                 control: serverActivityControl, maintenance: store.serverMaintenance,
+                                                 showsStopButton: true)
+                        }
+                    }
+                    if serverProcesses.isEmpty {
+                        Text("No processes in the server's latest reading.")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                .accessibilityLabel("Server activity, scroll for more processes")
             }
+            .accessibilityLabel("Server activity, scroll for more processes")
         }
         .padding(5)
-        .frame(maxWidth: .infinity, maxHeight: unified ? nil : .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
-    }
-
-    private var serverActivityRows: some View {
-        LazyVStack(alignment: .leading, spacing: 3) {
-            ForEach(serverProcesses) { process in
-                HStack(spacing: 6) {
-                    Text(process.name)
-                        .font(.system(size: 9.5, weight: .medium))
-                        .lineLimit(1)
-                    if let container = process.container, !container.isEmpty {
-                        Text(container)
-                            .font(.system(size: 8))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                    }
-                    Spacer()
-                    if process.cpuPercent.isFinite && process.cpuPercent >= 100 {
-                        // The number stays black; this small mark is the only
-                        // color, and only on a row using a full core or more (the per-core
-                        // value, the same rule Severity.forProcessCpu calls elevated).
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 8))
-                            .foregroundStyle(.yellow)
-                            .help("Using a full CPU core or more")
-                            .accessibilityLabel("High CPU")
-                    }
-                    Text(String(format: "%.0f%%", process.cpuPercent))
-                        .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(.primary)
-                    Text(process.memoryBytes.map { HogFormat.memory(UInt64(max(0, $0))) } ?? "—")
-                        .font(.system(size: 9).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    ServerProcessActions(process: process, host: store.maintain.vpsStore.configuredHost,
-                                         control: serverActivityControl, maintenance: store.serverMaintenance,
-                                         showsStopButton: true)
-                }
-            }
-            if serverProcesses.isEmpty {
-                Text("No processes in the server's latest reading.")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.secondary)
-            }
-        }
     }
 
     /// One wording for every volume: how much of it is spoken for, and how
