@@ -389,8 +389,7 @@ struct VPSProcess: Codable, Equatable, Sendable, Identifiable {
     }
 
     /// Whether this process sits at Hog Hunter's tame target.  Unknown when
-    /// the collector reported no priority.  `isTamed` below predates the
-    /// unknown case and keeps its meaning for its existing callers.
+    /// the collector reported no priority.
     var tameState: ServerTameState {
         guard let nice else { return .unknown }
         return nice == 19 ? .tamed : .untamed
@@ -407,7 +406,9 @@ struct VPSProcess: Codable, Equatable, Sendable, Identifiable {
         }
     }
 
-    var isTamed: Bool { (nice ?? 0) >= 15 }
+    /// True only at the tame target, matching `tameState`, so this flag can
+    /// never disagree with the action filter, the badges, or the caption.
+    var isTamed: Bool { tameState == .tamed }
 
     func can(action: String) -> Bool {
         guard let bootID, !bootID.isEmpty, let startTime, startTime > 0 else { return false }

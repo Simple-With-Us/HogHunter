@@ -11,7 +11,15 @@ enum CompanionFreshness {
 
     enum State: Equatable { case live, stale, reconnecting }
 
-    static func state(sampledAt: Date?, lastSuccessfulRefresh: Date, now: Date) -> State {
+    /// `throttledUntil` is the poll throttle deadline when a 429 holds the
+    /// loop, else nil.  A 429 is an answer, so while it holds the link is
+    /// alive by definition: the state caps at stale and the countdown
+    /// beside it explains the wait, instead of claiming Reconnecting.
+    static func state(sampledAt: Date?, lastSuccessfulRefresh: Date, now: Date, throttledUntil: Date? = nil) -> State {
+        if let throttledUntil, now < throttledUntil {
+            guard let sampledAt else { return .stale }
+            return now.timeIntervalSince(sampledAt) > staleAfter ? .stale : .live
+        }
         guard sampledAt != nil else { return .reconnecting }
         if now.timeIntervalSince(lastSuccessfulRefresh) > reconnectingAfter { return .reconnecting }
         if let sampledAt, now.timeIntervalSince(sampledAt) > staleAfter { return .stale }
@@ -34,8 +42,8 @@ enum CompanionFreshness {
         return "Updated \(Int(age / 3600)) hours ago"
     }
 
-    static func freshnessText(sampledAt: Date?, lastSuccessfulRefresh: Date, now: Date) -> String {
-        switch state(sampledAt: sampledAt, lastSuccessfulRefresh: lastSuccessfulRefresh, now: now) {
+    static func freshnessText(sampledAt: Date?, lastSuccessfulRefresh: Date, now: Date, throttledUntil: Date? = nil) -> String {
+        switch state(sampledAt: sampledAt, lastSuccessfulRefresh: lastSuccessfulRefresh, now: now, throttledUntil: throttledUntil) {
         case .live: return ageText(sampledAt: sampledAt, now: now)
         case .stale: return "\(ageText(sampledAt: sampledAt, now: now)) — may be out of date"
         case .reconnecting: return "Reconnecting…\u{00A0} \(ageText(sampledAt: sampledAt, now: now))"

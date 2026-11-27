@@ -29,6 +29,36 @@ final class CompanionFreshnessTests: XCTestCase {
             .reconnecting)
     }
 
+    func testAThrottleHoldsReconnectingAtStale() {
+        // A 429 is an answer: even past the 30s reconnecting line, a live
+        // throttle deadline caps the state at stale so the header never
+        // claims Reconnecting beside its own retry countdown.
+        let ancient = now.addingTimeInterval(-CompanionFreshness.reconnectingAfter - 60)
+        XCTAssertEqual(
+            CompanionFreshness.state(
+                sampledAt: ancient, lastSuccessfulRefresh: ancient, now: now,
+                throttledUntil: now.addingTimeInterval(120)),
+            .stale)
+        XCTAssertEqual(
+            CompanionFreshness.state(sampledAt: nil, lastSuccessfulRefresh: ancient, now: now,
+                                     throttledUntil: now.addingTimeInterval(120)),
+            .stale)
+        XCTAssertEqual(
+            CompanionFreshness.freshnessText(
+                sampledAt: ancient, lastSuccessfulRefresh: ancient, now: now,
+                throttledUntil: now.addingTimeInterval(120)).contains("Reconnecting"),
+            false)
+    }
+
+    func testAnExpiredThrottleReconnectsAgain() {
+        let ancient = now.addingTimeInterval(-CompanionFreshness.reconnectingAfter - 60)
+        XCTAssertEqual(
+            CompanionFreshness.state(
+                sampledAt: ancient, lastSuccessfulRefresh: ancient, now: now,
+                throttledUntil: now.addingTimeInterval(-1)),
+            .reconnecting)
+    }
+
     func testRemainingSecondsRoundsUpAndNeverGoesNegative() {
         XCTAssertEqual(CompanionFreshness.remainingSeconds(until: now.addingTimeInterval(14.2), now: now), 15)
         XCTAssertEqual(CompanionFreshness.remainingSeconds(until: now.addingTimeInterval(-3), now: now), 0)

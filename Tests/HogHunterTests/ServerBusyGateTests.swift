@@ -137,6 +137,15 @@ final class ServerTameStateTests: XCTestCase {
     func testSixteenIsNotTamed() {
         XCTAssertEqual(gateProcess(nice: 16).tameState, .untamed)
     }
+
+    /// The legacy flag follows the same state, so no reader can disagree
+    /// with the filter: only 19 reads tamed, and unknown reads false.
+    func testIsTamedMatchesTameState() {
+        XCTAssertTrue(gateProcess(nice: 19).isTamed)
+        XCTAssertFalse(gateProcess(nice: 16).isTamed)
+        XCTAssertFalse(gateProcess(nice: 0).isTamed)
+        XCTAssertFalse(gateProcess(nice: nil).isTamed)
+    }
 }
 
 // MARK: - The phone's tame labels

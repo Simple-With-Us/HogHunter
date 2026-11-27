@@ -1103,10 +1103,10 @@ struct DashboardView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                     TimelineView(.periodic(from: Date(), by: 1)) { context in
-                        Text(CompanionFreshness.freshnessText(sampledAt: snapshot.sampledAt, lastSuccessfulRefresh: model.lastSuccessfulRefresh, now: context.date))
+                        Text(CompanionFreshness.freshnessText(sampledAt: snapshot.sampledAt, lastSuccessfulRefresh: model.lastSuccessfulRefresh, now: context.date, throttledUntil: model.snapshotRetryAvailableAt))
                             .font(.caption)
-                            .foregroundStyle(CompanionFreshness.state(sampledAt: snapshot.sampledAt, lastSuccessfulRefresh: model.lastSuccessfulRefresh, now: context.date) == .live ? Color.secondary : Color.orange)
-                            .accessibilityLabel(CompanionFreshness.freshnessText(sampledAt: snapshot.sampledAt, lastSuccessfulRefresh: model.lastSuccessfulRefresh, now: context.date))
+                            .foregroundStyle(CompanionFreshness.state(sampledAt: snapshot.sampledAt, lastSuccessfulRefresh: model.lastSuccessfulRefresh, now: context.date, throttledUntil: model.snapshotRetryAvailableAt) == .live ? Color.secondary : Color.orange)
+                            .accessibilityLabel(CompanionFreshness.freshnessText(sampledAt: snapshot.sampledAt, lastSuccessfulRefresh: model.lastSuccessfulRefresh, now: context.date, throttledUntil: model.snapshotRetryAvailableAt))
                         if let wait = CompanionFreshness.countdownText(remainingSeconds: model.snapshotRetryRemaining(now: context.date)) {
                             Text(wait)
                                 .font(.caption)
