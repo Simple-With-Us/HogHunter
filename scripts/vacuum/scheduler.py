@@ -8,6 +8,7 @@ from .config import load_config
 from .engine import VacuumEngine
 from .models import TriggerKind
 from .models import RunRecord
+from .pressure import disk_free_floors, sample_mac
 from .store import VacuumStore
 
 
@@ -299,7 +300,26 @@ def run_scheduler_tick(
         results.append({"trigger": "janitor", "run_id": record.run_id})
 
     if "full" in selected:
-        record = engine.run(TriggerKind.FULL, band="cheap")
+        # The full cadence reclaims with the band the configured floors call
+        # for, the same rule the janitor's cache reclaim follows: at or below
+        # the pressure floor the disk is under pressure and the run takes the
+        # full band; above it the safe band.  Per-rule free-space lines and
+        # the calm-band gate still apply inside the reclaim engine.
+        #
+        # The band reads a sample taken now, this tick.  The persisted
+        # reading can be arbitrarily old -- the watch was not due, or a df
+        # failed and the keeper kept the last good number -- and a stale-low
+        # figure would put a healthy disk through the full band while a
+        # stale-high one would keep a pressed disk in the safe tier.  With no
+        # fresh reading the run stays in the safe band rather than act on a
+        # number nobody just measured.
+        fresh = sample_mac()
+        if fresh.get("disk_sample_ok", True):
+            _crit_gb, pressure_floor = disk_free_floors(cfg)
+            full_band = "full" if float(fresh.get("disk_free_gb", 999)) <= pressure_floor else "cheap"
+        else:
+            full_band = "cheap"
+        record = engine.run(TriggerKind.FULL, band=full_band)
         store.append_run(record)
         store.clear_partial_run(record.run_id)
         if not run_skipped_for_lock(record):
@@ -392,10 +412,7 @@ def build_status(
     # keys are the fallback for a config that carries only those.  Reading
     # the watch's 25/15 defaults here made the panel report "ok" at 40 GB
     # free while the owner's own floors called 45 GB critical.
-    rw_cfg = cfg.get("resource_watch", {})
-    janitor_cfg = cfg.get("janitor", {})
-    crit_gb = float(janitor_cfg.get("crit_free_gib", rw_cfg.get("disk_free_crit_gb", 15)))
-    warn_gb = float(janitor_cfg.get("pressure_free_gib", rw_cfg.get("disk_free_warn_gb", 25)))
+    crit_gb, warn_gb = disk_free_floors(cfg)
     disk: dict[str, Any] = {"free_gb": None, "health": "unknown"}
     raw_free = store.scheduler_state().get("prev_disk_free_gb")
     if raw_free is not None:

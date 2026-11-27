@@ -19,7 +19,7 @@ from .config import STEP_CATALOG, TICK_WATCHDOG_SEC, expand_path, step_enabled, 
 from .janitor import RetirePlan, data_dir_for, keep_regex, plan_retire_worktrees, retire_worktrees
 from .lock import HousekeeperLock, LockHeld
 from .models import RunRecord, StepResult, StepStatus, TriggerKind
-from .pressure import evaluate_hits, janitor_pressure_mode, sample_mac
+from .pressure import disk_free_floors, evaluate_hits, janitor_pressure_mode, sample_mac
 
 # Steps that run the lane doctor.  Under extreme host load they are skipped like the other heavy janitor work.
 #
@@ -507,7 +507,13 @@ class VacuumEngine:
         try:
             with HousekeeperLock(self.lock_path), self._child_barrier(record, dry_run):
                 sample = sample_mac()
-                hits = evaluate_hits(sample, prev_free, self.cfg.get("resource_watch", {}))
+                # The floors come from the one resolver the panel reads, so
+                # the pressure trigger fires where the status says the disk is
+                # pressed, not at a separate set of lines.
+                crit_gb, warn_gb = disk_free_floors(self.cfg)
+                rw_floors = {**self.cfg.get("resource_watch", {}),
+                             "disk_free_crit_gb": crit_gb, "disk_free_warn_gb": warn_gb}
+                hits = evaluate_hits(sample, prev_free, rw_floors)
                 # Only a sample that really came back from df is worth keeping.  A df
                 # that failed reads as zero free, and writing that here would report a
                 # critical shortage the disk does not have until the next tick lands.
@@ -1440,7 +1446,7 @@ class VacuumEngine:
         # band.  The semi-safe and expensive tiers still sit behind the
         # engine's own calm-band gate and each rule's free-space line, and
         # the work stays budget-bounded whatever the band.
-        pressure_floor = float(janitor_cfg.get("pressure_free_gib", 65))
+        _crit_gb, pressure_floor = disk_free_floors(self.cfg)
         band = "full" if free_gib <= pressure_floor else "cheap"
         return self._hoghunter_reclaim(band)
 

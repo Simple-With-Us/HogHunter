@@ -35,6 +35,7 @@ Modes are mutually exclusive with --categories=... --policy to see everything.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import plistlib
@@ -2138,9 +2139,17 @@ def rule_xcode_artifacts() -> list[Candidate]:
     return cands
 
 
+# A runtime bundle name starts with the platform, then a separator, then the
+# version: "iOS 27.2.simruntime", "iOS_27_2.simruntime", "watchOS 11.4...".
+# The pattern is anchored so a directory that merely CONTAINS a platform word
+# ("Old iOS_26_5 backup") is not read as a runtime; whatever does not parse
+# is kept, never offered.
+_RUNTIME_NAME_RE = re.compile(r"\s*(ios|tvos|watchos|visionos|xros)[-_ ]+(\d+(?:[-_.]\d+)*)", re.I)
+
+
 def _runtime_platform_version(name: str) -> tuple[str, tuple[int, ...]] | None:
     """('ios', (27, 2)) from a .simruntime bundle name, or None when it does not parse."""
-    m = re.search(r"(ios|tvos|watchos|visionos|xros)[-_ ]?(\d+(?:[-_.]\d+)*)", name, re.I)
+    m = _RUNTIME_NAME_RE.match(name)
     if not m:
         return None
     version = tuple(int(p) for p in re.split(r"[-_.]", m.group(2)) if p.isdigit())
@@ -2149,12 +2158,20 @@ def _runtime_platform_version(name: str) -> tuple[str, tuple[int, ...]] | None:
     return m.group(1).lower(), version
 
 
+@functools.cache
 def _xcode_iphoneos_sdk_version() -> tuple[int, ...] | None:
-    """The iOS SDK version of the selected Xcode, or None when it cannot be read."""
+    """The iOS SDK version of the selected Xcode, or None when it cannot be read.
+
+    One probe per process: the selected Xcode does not change during a run,
+    and xcrun can take seconds on a cold start, so repeat callers share the
+    first answer.  A healthy xcrun answers in well under a second; a hung
+    one must not hold the scan, and the rule fails closed when it cannot
+    read the SDK.
+    """
     try:
         p = subprocess.run(
             ["/usr/bin/xcrun", "--sdk", "iphoneos", "--show-sdk-version"],
-            capture_output=True, text=True, timeout=probe_timeout(30.0),
+            capture_output=True, text=True, timeout=probe_timeout(5.0),
         )
     except (OSError, subprocess.SubprocessError):
         return None

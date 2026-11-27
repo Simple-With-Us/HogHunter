@@ -3562,12 +3562,48 @@ def test_simulator_runtimes_fail_closed_when_the_sdk_version_is_unreadable(hh):
 def test_xcode_sdk_version_parsing(hh):
     """The SDK reader takes the leading version tuple and nothing else."""
     import subprocess as sp
-    with mock.patch.object(hh.subprocess, "run", return_value=sp.CompletedProcess([], 0, "27.2\n", "")):
-        assert hh._xcode_iphoneos_sdk_version() == (27, 2)
-    with mock.patch.object(hh.subprocess, "run", return_value=sp.CompletedProcess([], 1, "", "err")):
-        assert hh._xcode_iphoneos_sdk_version() is None
+    reader = hh._xcode_iphoneos_sdk_version
+    for result, want in (
+        (sp.CompletedProcess([], 0, "27.2\n", ""), (27, 2)),
+        (sp.CompletedProcess([], 1, "", "err"), None),
+    ):
+        reader.cache_clear()
+        with mock.patch.object(hh.subprocess, "run", return_value=result):
+            assert reader() == want
+    reader.cache_clear()
     with mock.patch.object(hh.subprocess, "run", side_effect=OSError("no xcrun")):
-        assert hh._xcode_iphoneos_sdk_version() is None
+        assert reader() is None
+    reader.cache_clear()
+
+
+def test_xcode_sdk_version_probe_runs_once_per_process(hh):
+    """xcrun can take seconds on a cold start and the selected Xcode does not
+    change during a run: repeat readers share the first probe's answer."""
+    import subprocess as sp
+    reader = hh._xcode_iphoneos_sdk_version
+    reader.cache_clear()
+    try:
+        with mock.patch.object(hh.subprocess, "run",
+                               return_value=sp.CompletedProcess([], 0, "27.2\n", "")) as run:
+            assert reader() == (27, 2)
+            assert reader() == (27, 2)
+        assert run.call_count == 1
+    finally:
+        reader.cache_clear()
+
+
+def test_runtime_name_parser_is_anchored(hh):
+    """Only a name that STARTS with the platform parses.  A directory that
+    merely contains a platform word is not read as a runtime, and whatever
+    does not parse is kept, never offered."""
+    parse = hh._runtime_platform_version
+    assert parse("iOS 27.2.simruntime") == ("ios", (27, 2))
+    assert parse("iOS_27_2.simruntime") == ("ios", (27, 2))
+    assert parse("watchOS 11.4.simruntime") == ("watchos", (11, 4))
+    assert parse("tvOS-26-2.simruntime") == ("tvos", (26, 2))
+    assert parse("com.apple.CoreSimulator.SimRuntime.iOS-27-2") is None
+    assert parse("Old iOS_26_5 backup.simruntime") is None
+    assert parse("iOS27.simruntime") is None
 
 
 def test_the_policy_states_the_tier_the_simulator_rule_really_runs_at(hh):

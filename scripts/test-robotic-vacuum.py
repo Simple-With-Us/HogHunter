@@ -1071,6 +1071,46 @@ class TestHogHunterReclaimStep(_EngineHome):
             engine._janitor_cache_reclaim({"disk_free_gb": 40.23}, "normal", dry_run=False)
         self.assertIn("--band=cheap", run.call_args.args[0], "a lowered floor moves the band with it")
 
+    def test_the_watch_fires_pressure_at_the_same_floors_the_status_reports(self):
+        """One resolver feeds the pressure trigger and the panel: at the
+        shipped floors a watch sample of 60 GB free is a pressure hit and
+        escalates.  Before, the trigger read only the resource_watch 25/15
+        defaults, so the panel called 60 GB acute while no pressure run
+        ever fired."""
+        from vacuum.engine import VacuumEngine
+
+        sample = {"disk_sample_ok": True, "sample_complete": True, "disk_free_gb": 60.0,
+                  "swap_used_pct": 0.0, "swap_used_gb": 0.0, "load1": 0.0}
+        runs = []
+
+        def fake_run(self, trigger, pressure=False, band="cheap", dry_run=False):
+            runs.append((trigger, band))
+            rec = RunRecord("p", trigger, started_at=time.time())
+            rec.finish()
+            return rec
+
+        with patch("vacuum.engine.sample_mac", return_value=sample), \
+                patch.object(VacuumEngine, "run", fake_run):
+            _record, hits, cleaned = self.engine.run_watch_tick({}, None)
+        self.assertTrue(any(h["metric"] == "disk_free_gb" for h in hits), hits)
+        self.assertTrue(cleaned)
+        self.assertIn((TriggerKind.PRESSURE, "full"), runs)
+
+    def test_the_watch_stays_quiet_above_the_floors(self):
+        from vacuum.engine import VacuumEngine
+
+        sample = {"disk_sample_ok": True, "sample_complete": True, "disk_free_gb": 90.0,
+                  "swap_used_pct": 0.0, "swap_used_gb": 0.0, "load1": 0.0}
+
+        def fake_run(self, trigger, pressure=False, band="cheap", dry_run=False):
+            raise AssertionError("no pressure run above the floors")
+
+        with patch("vacuum.engine.sample_mac", return_value=sample), \
+                patch.object(VacuumEngine, "run", fake_run):
+            _record, hits, cleaned = self.engine.run_watch_tick({}, None)
+        self.assertEqual(hits, [])
+        self.assertFalse(cleaned)
+
     def test_the_disk_reclaim_step_runs_even_under_extreme_load(self):
         """The load guard that opened this step is gone.  Skipping the disk reclaim
         because the host is loaded is a deadlock: the disk pressure that loads the
@@ -3483,7 +3523,48 @@ class TestCadenceOccupancy(unittest.TestCase):
     def _messages(self, notify) -> list:
         return [call.args[1] for call in notify.call_args_list]
 
-    # MARK: - The alert layer
+    def test_the_full_cadence_reclaims_with_the_band_the_floors_call_for(self):
+        """The full cadence used to reclaim in the safe band no matter how low
+        the disk sat.  The band reads a sample taken this tick: at or below
+        the pressure floor the run takes the full band; above it, the safe
+        band.  A persisted figure never decides it -- it can be arbitrarily
+        old when the watch was not due or a df failed -- and a failed probe
+        keeps the safe band rather than act on an unmeasured disk."""
+        from vacuum.scheduler import run_scheduler_tick
+
+        cases = (
+            ({"disk_sample_ok": True, "disk_free_gb": 12.0}, 90.0, "full"),   # stale-high prev must not keep it cheap
+            ({"disk_sample_ok": True, "disk_free_gb": 79.9}, None, "full"),   # no persisted reading at all
+            ({"disk_sample_ok": True, "disk_free_gb": 60.0}, None, "full"),
+            ({"disk_sample_ok": True, "disk_free_gb": 90.0}, 12.0, "cheap"),  # stale-low prev must not force full
+            ({"disk_sample_ok": False, "disk_free_gb": 0.0}, 12.0, "cheap"),  # failed probe: never act on an unmeasured number
+        )
+        for sample, prev, want in cases:
+            with tempfile.TemporaryDirectory() as td:
+                store = self._store(td)
+                store.cfg.setdefault("janitor", {})["pressure_free_gib"] = 80
+                now = time.time()
+                store.touch_scheduler("last_watch", now)
+                store.touch_scheduler("last_janitor", now)
+                store.touch_scheduler("last_full", now - 20000)
+                if prev is not None:
+                    store.merge_scheduler_state({"prev_disk_free_gb": prev})
+                bands = {}
+
+                def fake_run(self, trigger, band="cheap", dry_run=False):
+                    bands[trigger] = band
+                    record = RunRecord(run_id="tick-1", trigger=trigger, started_at=now, ended_at=now)
+                    record.steps = [StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED)]
+                    return record
+
+                full_sample = {"at": int(now), "sample_complete": True, "load1": 0.0,
+                               "swap_used_pct": 0.0, "swap_used_gb": 0.0, **sample}
+                with patch("vacuum.engine.VacuumEngine.run", fake_run):
+                    with patch("vacuum.scheduler.sample_mac", return_value=full_sample):
+                        with patch("vacuum.alerts.notify_macos"):
+                            with patch("vacuum.alerts.launchd_loaded", return_value=True):
+                                run_scheduler_tick(store, now=now)
+                self.assertEqual(bands.get(TriggerKind.FULL), want, (sample, prev))
 
     def test_a_cadence_another_cadence_occupied_is_not_reported_overdue(self):
         with tempfile.TemporaryDirectory() as td:
