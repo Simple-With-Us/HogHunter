@@ -6,9 +6,11 @@ import XCTest
 /// The Overview summary was capped at 320pt so it never grew with the window
 /// (PR #398 fixed that), and then `layoutPriority(1)` on `activitySection`
 /// claimed space first so the summary collapsed to 0pt in short windows
-/// (Kody's high-severity finding on PR #398).  Both regressions are covered
-/// here: the summary never collapses below a usable floor, and it grows with
-/// the window like the Disk Cleaner does.  No live app is launched.
+/// (Kody's high-severity finding on PR #398).  The split is gone now: one
+/// scroll holds the cards, captions, and activity rows together.  Covered
+/// here: the scroll viewport never collapses below a usable floor, it grows
+/// with the window like the Disk Cleaner does, and the rows size their own
+/// block instead of clipping to a strip.  No live app is launched.
 @MainActor
 final class OverviewLayoutTests: XCTestCase {
 
@@ -22,8 +24,10 @@ final class OverviewLayoutTests: XCTestCase {
     }
 
     /// A populated store the Overview panel can render without starting the
-    /// real sampler (layout tests only).
-    private func populatedStore(_ preferences: UserDefaults) -> HogStore {
+    /// real sampler (layout tests only).  Pass explicit rows (possibly none)
+    /// to pin how the activity block sizes itself.
+    private func populatedStore(_ preferences: UserDefaults,
+                                processRows: [(String, Double, UInt64)]? = nil) -> HogStore {
         let store = HogStore(historyURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("overview-layout-\(UUID().uuidString).sqlite"),
             defaults: preferences, startImmediately: false)
@@ -47,7 +51,7 @@ final class OverviewLayoutTests: XCTestCase {
         pulse.powerSource = "Battery Power"
         pulse.sampledAt = Date()
 
-        let processRows: [(String, Double, UInt64)] = [
+        let processRows: [(String, Double, UInt64)] = processRows ?? [
             ("Browser", 180, 7_400_000_000),
             ("Code Editor", 122, 4_800_000_000),
             ("Design Tool", 71, 3_200_000_000),
@@ -70,16 +74,16 @@ final class OverviewLayoutTests: XCTestCase {
     }
 
     /// Renders the Overview panel at a window size and returns the measured
-    /// summary height, writing a PNG when `renderName` is given.
-    private func overviewSummaryHeight(in size: CGSize, preferences: UserDefaults,
-                                       renderName: String?) throws -> CGFloat {
+    /// scroll viewport height, writing a PNG when `renderName` is given.
+    private func overviewScrollViewportHeight(in size: CGSize, preferences: UserDefaults,
+                                              renderName: String?) throws -> CGFloat {
         let box = Box()
         let store = populatedStore(preferences)
         let root = HogHunterPanel(initialTab: .overview)
             .environmentObject(store)
             .defaultAppStorage(preferences)
             .frame(width: size.width, height: size.height)
-            .onPreferenceChange(OverviewSummaryHeight.self) { box.height = $0 }
+            .onPreferenceChange(OverviewScrollViewportHeight.self) { box.height = $0 }
         let host = NSHostingView(rootView: root)
         host.appearance = NSAppearance(named: .aqua)
         host.frame = CGRect(origin: .zero, size: size)
@@ -94,57 +98,93 @@ final class OverviewLayoutTests: XCTestCase {
         return box.height
     }
 
+    /// Renders the Overview panel and returns the height the activity rows
+    /// actually occupy, so the rows can never silently clip to a fixed
+    /// strip with their own scrollbar again.
+    private func overviewActivityHeight(in size: CGSize, preferences: UserDefaults,
+                                        processRows: [(String, Double, UInt64)]?) throws -> CGFloat {
+        let box = Box()
+        let store = populatedStore(preferences, processRows: processRows)
+        let root = HogHunterPanel(initialTab: .overview)
+            .environmentObject(store)
+            .defaultAppStorage(preferences)
+            .frame(width: size.width, height: size.height)
+            .onPreferenceChange(OverviewActivityHeight.self) { box.height = $0 }
+        let host = NSHostingView(rootView: root)
+        host.appearance = NSAppearance(named: .aqua)
+        host.frame = CGRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: .aqua)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        host.layoutSubtreeIfNeeded()
+        window.contentView = nil
+        return box.height
+    }
+
     private func render<V: View>(_ host: NSHostingView<V>, size: CGSize, name: String) throws {
         let directory = ProcessInfo.processInfo.environment["HOGHUNTER_RENDER_DIR"]
             ?? FileManager.default.temporaryDirectory.appendingPathComponent("overview-layout").path
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+        // The host must lay out in a window and cache its display, or the
+        // bitmap comes back black (the Maintain layout tests do the same).
+        host.frame = CGRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: .aqua)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        host.layoutSubtreeIfNeeded()
         let rep = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds),
             "nothing rendered for \(name)")
+        host.cacheDisplay(in: host.bounds, to: rep)
+        window.contentView = nil
         let data = try XCTUnwrap(rep.representation(using: .png, properties: [:]))
         try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent(name + ".png"))
     }
 
     /// **The regression.**  With `layoutPriority(1)` on `activitySection`, the
     /// summary ScrollView starved to 0pt in a short window and the overview
-    /// cards vanished.  The summary must keep a usable minimum regardless of
-    /// how short the window is.
-    func testOverviewSummaryNeverCollapsesInAShortWindow() throws {
+    /// cards vanished.  The one scroll viewport must keep a usable minimum
+    /// regardless of how short the window is.
+    func testOverviewScrollNeverCollapsesInAShortWindow() throws {
         let suiteName = "hh-overview-layout-\(UUID().uuidString)"
         let suite = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { suite.removePersistentDomain(forName: suiteName) }
-        let height = try overviewSummaryHeight(in: minimumSize, preferences: suite,
-                                               renderName: "hh236-overview-minimum")
-        XCTAssertGreaterThanOrEqual(height, 200, "the summary got \(Int(height))pt in a \(Int(minimumSize.height))pt window")
+        let height = try overviewScrollViewportHeight(in: minimumSize, preferences: suite,
+                                                      renderName: "hh236-overview-minimum")
+        XCTAssertGreaterThanOrEqual(height, 200, "the scroll got \(Int(height))pt in a \(Int(minimumSize.height))pt window")
     }
 
-    /// **Jay's decision (2026-11-27).**  The overview cards stay the same size
-    /// whatever the window; a taller window gives the extra room to Activity.
-    func testOverviewSummaryKeepsItsSizeWhenTheWindowGrows() throws {
+    /// **Jay's "Grow" decision.**  A taller window gives the scroll viewport
+    /// more room, just like the Disk Cleaner's scroll region grows with the
+    /// window.  The window grows 200pt between the two sizes; the viewport
+    /// must take nearly all of it.
+    func testOverviewScrollGrowsWithTheWindow() throws {
         let suiteName = "hh-overview-layout-\(UUID().uuidString)"
         let suite = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { suite.removePersistentDomain(forName: suiteName) }
-        let short = try overviewSummaryHeight(in: minimumSize, preferences: suite,
-                                              renderName: "hh236-overview-minimum")
-        let tall = try overviewSummaryHeight(in: grownSize, preferences: suite,
-                                             renderName: "hh236-overview-grown")
-        XCTAssertEqual(tall, short, accuracy: 2, "the summary changed size with the window (short \(Int(short))pt, tall \(Int(tall))pt)")
+        let short = try overviewScrollViewportHeight(in: minimumSize, preferences: suite,
+                                                     renderName: "hh236-overview-minimum")
+        let tall = try overviewScrollViewportHeight(in: grownSize, preferences: suite,
+                                                    renderName: "hh236-overview-grown")
+        XCTAssertGreaterThan(tall, short + 150, "the scroll did not grow with the window (short \(Int(short))pt, tall \(Int(tall))pt)")
     }
 
-    /// The split never gives the summary more than its content, never starves it
-    /// below a usable floor, and leaves the activity list room in a short window.
-    func testOverviewSplitProportions() {
-        // Content shorter than the share: no blank strip under it.
-        XCTAssertEqual(OverviewSplit.summaryHeight(available: 800, content: 300), 300)
-        // Content taller than the share: capped, so the summary scrolls and activity keeps the rest.
-        XCTAssertEqual(OverviewSplit.summaryHeight(available: 800, content: 900), 800 * OverviewSplit.summaryShare, accuracy: 0.5)
-        // A short page keeps the floor and leaves activity its minimum.
-        XCTAssertGreaterThanOrEqual(OverviewSplit.summaryHeight(available: 400, content: 900), OverviewSplit.summaryFloor)
-        XCTAssertLessThanOrEqual(OverviewSplit.summaryHeight(available: 600, content: 900), 600 - OverviewSplit.activityFloor)
-        // Before the content is measured the region still has a usable height.
-        XCTAssertGreaterThanOrEqual(OverviewSplit.summaryHeight(available: 600, content: 0), OverviewSplit.summaryFloor)
-        // It grows with the page.
-        XCTAssertGreaterThan(OverviewSplit.summaryHeight(available: 900, content: 2000),
-                             OverviewSplit.summaryHeight(available: 600, content: 2000))
+    /// **The dashboard scroll.**  The activity rows lived in a fixed strip
+    /// with its own scrollbar while the summary above scrolled separately,
+    /// so the processes were a tiny area at the bottom.  The rows now size
+    /// their own block inside the one Overview scroll: seven rows must stand
+    /// a full row-set taller than none.
+    func testActivityRowsSizeTheScrollContent() throws {
+        let suiteName = "hh-overview-layout-\(UUID().uuidString)"
+        let suite = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { suite.removePersistentDomain(forName: suiteName) }
+        let empty = try overviewActivityHeight(in: minimumSize, preferences: suite, processRows: [])
+        let full = try overviewActivityHeight(in: minimumSize, preferences: suite, processRows: nil)
+        XCTAssertGreaterThan(full - empty, 100,
+            "seven rows stand only \(Int(full - empty))pt taller than none (empty \(Int(empty))pt, full \(Int(full))pt)")
     }
 
     /// The panel must fit within the height it is offered rather than asking
