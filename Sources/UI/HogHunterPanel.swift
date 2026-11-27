@@ -447,11 +447,21 @@ struct HogHunterPanel: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top, spacing: 10) {
                     cpuHistoryCard
+                        .frame(maxHeight: .infinity)
                     Meter(title: "Memory", value: store.pulse.memoryPercent,
                           caption: store.memorySizeCaption,
                           severity: Severity.forPressure(store.pulse.pressure),
                           accessibilityDetail: store.memoryCaption)
-                        .frame(width: 260)
+                        .frame(maxHeight: .infinity)
+                    if store.pulse.swapTotalBytes > 0 {
+                        // The server Overview shows swap as a meter with used and total;
+                        // the Mac only had a "Swapped" pill with no total.
+                        Meter(title: "Swap",
+                              value: Double(store.pulse.swapUsedBytes) / Double(store.pulse.swapTotalBytes) * 100,
+                              caption: "\(HogFormat.memory(store.pulse.swapUsedBytes)) of \(HogFormat.memory(store.pulse.swapTotalBytes)) swapped",
+                              severity: Severity.forPressure(store.pulse.pressure))
+                            .frame(maxHeight: .infinity)
+                    }
                 }
                 .frame(height: 94)
                 pillRow(memoryPills + thermalPills)
