@@ -4457,6 +4457,24 @@ def test_test_cache_flat_base_joins_the_sweep(hh):
         assert not flat.exists(), "the flat base goes"
 
 
+def test_test_cache_symlinked_base_is_skipped(hh):
+    """A link under the cache is never scoped through its target: the flat
+    read refuses links by lstat and the nested read must not follow one."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root = home / "Library" / "Caches" / "HogHunterDerivedData"
+        target = home / "elsewhere"
+        tree = xcode_tree(home, "HogHunter-gypzzncfdrkbjcaurhenaphjrkpw", root=target)
+        blob(target / "SDKStatCaches.noindex" / "pad", 30)
+        settle(target, 30)
+        base = cache_root / "linked-checkout"
+        base.parent.mkdir(parents=True, exist_ok=True)
+        base.symlink_to(target)
+        assert hh._test_cache_scope(base) is None
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 0, report
+        assert base.is_symlink() and tree.exists(), "the link and its target stay"
+
+
 def test_the_roots_list_names_the_test_cache(hh):
     with fake_home(hh) as home:
         roots = [(str(r), mode) for r, mode in hh._xcode_scratch_roots()]

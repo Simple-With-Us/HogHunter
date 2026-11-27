@@ -3553,7 +3553,11 @@ def _test_cache_scope(child: Path) -> tuple[Path, Path, str | None] | None:
     would otherwise hide -- and `delete` names what may go: the whole base
     when everything beside the root is whitelisted build noise, else the
     root alone.  A base child that is itself a DerivedData root (an explicit
-    -derivedDataPath run) identifies at the base."""
+    -derivedDataPath run) identifies at the base.  A symlinked base is
+    skipped outright: the flat read refuses links by lstat, and the nested
+    read must not follow one into the target it points at."""
+    if child.is_symlink():
+        return None
     if _xcode_shape_refusal(child) is None:
         return child, child, None
     inner = []
