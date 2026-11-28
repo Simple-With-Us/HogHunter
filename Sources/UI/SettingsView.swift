@@ -158,6 +158,7 @@ private struct GeneralSettingsTab: View {
     @AppStorage(HogStore.Key.showMenuBarIcon) private var showMenuBarIcon: Bool = false
     @AppStorage(HogStore.Key.showMenuBarPercent) private var showMenuBarPercent: Bool = true
     @AppStorage(HogStore.Key.cpuScale) private var cpuScale = CpuScale.perCore.rawValue
+    @AppStorage(DashboardCpuChartStyle.preferenceKey) private var dashboardCpuChartStyle = DashboardCpuChartStyle.line.rawValue
 
     var body: some View {
         Form {
@@ -190,6 +191,10 @@ private struct GeneralSettingsTab: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                Picker("Dashboard CPU Chart", selection: $dashboardCpuChartStyle) {
+                    ForEach(DashboardCpuChartStyle.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                }
 
                 Picker("CPU Rows Show", selection: $cpuScale) {
                     ForEach(CpuScale.allCases) {
@@ -448,6 +453,110 @@ private struct CleanerSettingsTab: View {
 
 // MARK: - Maintenance Tab
 
+private struct AutomaticCleanupSettingsSection: View {
+    @State private var regimen = CleanRegimen.load().sanitized()
+    @State private var trashExcluded = CleanerExclusions.load().isCategoryExcluded(.trash)
+    @State private var confirmRun = false
+    @ObservedObject private var runner = CleanRegimenRunner.shared
+
+    private func edit(_ change: (inout CleanRegimen) -> Void, resetSchedule: Bool = false) {
+        var saved = CleanRegimen.load().sanitized()
+        change(&saved)
+        saved = saved.sanitized()
+        saved.save()
+        regimen = saved
+        if resetSchedule && saved.isEnabled { runner.scheduleFromNow(regimen: saved) }
+        else { runner.refreshSchedule(regimen: saved) }
+    }
+
+    private var managedInterval: Double? {
+        InfisicalStore.shared.double(for: InfisicalKey.regimenIntervalHours)
+    }
+
+    private func hourLabel(_ hours: Double) -> String {
+        hours == 1 ? "1 hour" : "\(hours.formatted()) hours"
+    }
+
+    var body: some View {
+        Section("Automatic Cleanup & Trash") {
+            Toggle("Automatic Cleanup", isOn: Binding(
+                get: { regimen.isEnabled },
+                set: { value in edit({ $0.isEnabled = value }, resetSchedule: true) }
+            ))
+            if regimen.isEnabled {
+                if let interval = managedInterval {
+                    LabeledContent("Cleanup Frequency", value: hourLabel(interval) + " · managed by Infisical")
+                } else {
+                    Picker("Cleanup Frequency", selection: Binding(
+                        get: { regimen.intervalHours },
+                        set: { value in edit({ $0.intervalHours = value }, resetSchedule: true) }
+                    )) {
+                        ForEach(Array(Set([1.0, 4, 12, 24, regimen.intervalHours])).sorted(), id: \.self) {
+                            Text(hourLabel($0)).tag($0)
+                        }
+                    }
+                }
+                Picker("Wait for Mac to Be Idle", selection: Binding(
+                    get: { regimen.requireIdleMinutes },
+                    set: { value in edit { $0.requireIdleMinutes = value } }
+                )) {
+                    ForEach(Array(Set([0.0, 5, 15, 30, 60, regimen.requireIdleMinutes])).sorted(), id: \.self) {
+                        Text($0 == 0 ? "No minimum" : "\($0.formatted()) minutes").tag($0)
+                    }
+                }
+                Toggle("Skip During Builds", isOn: Binding(
+                    get: { regimen.avoidDuringBuilds },
+                    set: { value in edit { $0.avoidDuringBuilds = value } }
+                ))
+                Toggle("Only Run While a Hog Hunter Panel Is Open", isOn: Binding(
+                    get: { regimen.requireUserPresent },
+                    set: { value in edit { $0.requireUserPresent = value } }
+                ))
+                Toggle("Empty Trash When Space Is Low", isOn: Binding(
+                    get: { regimen.emptyTrashBelowGB != nil },
+                    set: { value in edit { $0.emptyTrashBelowGB = value ? 40 : nil } }
+                ))
+                if let threshold = regimen.emptyTrashBelowGB {
+                    Picker("Empty Trash At or Below", selection: Binding(
+                        get: { regimen.emptyTrashBelowGB ?? 40 },
+                        set: { value in edit { $0.emptyTrashBelowGB = value } }
+                    )) {
+                        ForEach(Array(Set([15.0, 25, 40, 60, 80, threshold])).sorted(), id: \.self) {
+                            Text("\($0.formatted()) GB free").tag($0)
+                        }
+                    }
+                    Text(trashExcluded
+                         ? "Trash is excluded in Settings → Cleaner, so scheduled cleanup will skip it."
+                         : "Only a scheduled cleanup can empty the Trash. When its conditions are met, items are permanently deleted. Run Now does not empty it.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Scheduled cleanup leaves the Trash alone.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                LabeledContent("Schedule Status", value: runner.statusLine)
+                Button("Run Cleanup Now…") { confirmRun = true }
+                    .disabled(runner.isRunning)
+            } else {
+                Text("This schedule will not delete files or empty the Trash.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .onAppear {
+            regimen = CleanRegimen.load().sanitized()
+            trashExcluded = CleanerExclusions.load().isCategoryExcluded(.trash)
+        }
+        .sheet(isPresented: $confirmRun) {
+            RegimenRunConfirmationView {
+                confirmRun = false
+                runner.runNow()
+            } cancel: { confirmRun = false }
+        }
+    }
+}
+
 private struct MaintenanceSettingsTab: View {
     @EnvironmentObject private var store: HogStore
 
@@ -461,6 +570,7 @@ private struct MaintenanceSettingsContent: View {
 
     var body: some View {
         Form {
+            AutomaticCleanupSettingsSection()
             Section("Scheduled Maintenance Steps") {
                 Text("Configure which tasks Hog Hunter runs during automated maintenance sweeps.\u{00A0} Steps turned off here will not run on future sweeps and will be hidden from the active Maintain panel.")
                     .font(.system(size: 11))

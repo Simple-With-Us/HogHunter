@@ -9,16 +9,6 @@ private enum DashboardMountedDrives {
     static let shared = MountedDriveStore.shared
 }
 
-private struct ServerOverviewSummaryHeight: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
-/// The height of the Overview's single scroll viewport, measured offscreen
-/// in layout tests so it can never silently collapse to 0pt in a short window
-/// (Kody's finding on PR #398) while still growing with the window per Jay's
-/// "Grow" decision.  The cards, captions, and activity rows all live inside
-/// this one scroll, so the viewport — not a summary split — is what grows.
 struct OverviewScrollViewportHeight: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
@@ -40,6 +30,7 @@ enum PanelTab: String, CaseIterable, Identifiable {
     case network = "Network"
 
     var id: String { rawValue }
+    static var hostSections: [Self] { allCases.filter { $0 != .overview } }
 }
 
 struct HogHunterPanel: View {
@@ -62,7 +53,6 @@ struct HogHunterPanel: View {
     @State private var driveReadAttempted = false
     @State private var mountedDrivePage = 0
     @State private var pendingQuit: HogRow?
-    @State private var serverOverviewSummaryHeight: CGFloat = 180
     @State private var hasVisitedStorage = false
     @State private var hasVisitedNetwork = false
     @State private var storageSubTab: StorageSubTab = .apps
@@ -102,13 +92,11 @@ struct HogHunterPanel: View {
         var id: String { rawValue }
     }
 
-    /// Which part of the server snapshot a section shows.  Every section has
-    /// an answer, and no two sections answer with the same readings, so a
-    /// section can never look like the one before it.  Network is the one
-    /// section the snapshot cannot answer, and it says so instead.
+    /// Overview is shared; the server snapshot has no Network detail.
+    /// The remaining pages each own a distinct part of the snapshot.
     static func serverSection(for tab: PanelTab) -> VPSResourceSection? {
         switch tab {
-        case .overview: return .all
+        case .overview: return nil
         case .activity: return .activity
         case .storage: return .storage
         case .maintenance: return .maintenance
@@ -129,21 +117,26 @@ struct HogHunterPanel: View {
                 HStack {
                     Text(pageTitle)
                         .font(.system(size: 20, weight: .semibold))
-                    if store.isStale {
+                    if selectedTab != .overview && hostScope == .mac && store.isStale {
                         lateReadingsControl
                     }
                     Spacer(minLength: 8)
                 }
                 Divider()
                 ZStack(alignment: .topLeading) {
-                    if selectedTab == .activity && hostScope == .mac {
-                        activityContent
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    } else if selectedTab == .overview {
+                    if selectedTab == .activity {
                         Group {
-                            if hostScope == .mac { overview } else { serverOverview }
+                            if hostScope == .mac {
+                                activityContent
+                            } else {
+                                VPSResourceCardView(store: store.maintain.vpsStore, section: .activity,
+                                                    control: store.serverControl, maintenance: store.serverMaintenance)
+                            }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    } else if selectedTab == .overview {
+                        overview
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     } else if selectedTab == .maintenance && hostScope == .mac {
                         MaintainView(store: store.maintain, showHeader: true)
                     } else if (selectedTab != .network || hostScope != .mac)
@@ -222,29 +215,30 @@ struct HogHunterPanel: View {
             .padding(18)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
+        .onReceive(DetachedWindowManager.shared.$destination) { destination in
+            guard let destination else { return }
+            hostScope = .mac
+            switch destination {
+            case .activity:
+                selectedTab = .activity
+            case .cleaner:
+                storageSubTab = .clean
+                selectedTab = .storage
+            }
+        }
         .frame(minWidth: Self.dashboardMinimumWidth, minHeight: 580)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
-    /// The left rail: which host the sections below are about, the sections
-    /// themselves, and Settings at the bottom.
-    ///
-    /// The host used to be a picker in the window header, above the content.
-    /// From there it read like a setting rather than a destination, and the
-    /// section list underneath kept its Mac meaning while the server was on,
-    /// so choosing a section looked like it did nothing.  The host now sits
-    /// at the top of the same rail as the sections it governs, every section
-    /// renders for the host that is selected, and Settings is a rail item
-    /// instead of a gear in the header.
+    /// Overview is global; the host picker governs only the pages below it.
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 5) {
-            // No wordmark here: the window's title bar already says "Hog
-            // Hunter", and the rail starts with the host it is about.
+            sectionButton(.overview)
+            Divider().padding(.vertical, 4)
             scopeTabs
                 .padding(.horizontal, 6)
-                .padding(.top, 6)
-                .padding(.bottom, 8)
-            ForEach(PanelTab.allCases) { tab in
+                .padding(.bottom, 5)
+            ForEach(PanelTab.hostSections) { tab in
                 sectionButton(tab)
             }
             Spacer(minLength: 0)
@@ -271,16 +265,17 @@ struct HogHunterPanel: View {
             ForEach(HostScope.allCases) { scope in
                 Button {
                     hostScope = scope
+                    if selectedTab == .overview { selectedTab = .activity }
                 } label: {
                     Text(scope.rawValue)
-                        .font(.system(size: 11, weight: hostScope == scope ? .semibold : .regular))
+                        .font(.system(size: 11, weight: (selectedTab != .overview && hostScope == scope) ? .semibold : .regular))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 5)
-                        .background(hostScope == scope ? Color.accentColor.opacity(0.16) : .clear,
+                        .background((selectedTab != .overview && hostScope == scope) ? Color.accentColor.opacity(0.16) : .clear,
                                     in: RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(.plain)
-                .accessibilityAddTraits(hostScope == scope ? [.isSelected] : [])
+                .accessibilityAddTraits((selectedTab != .overview && hostScope == scope) ? [.isSelected] : [])
                 .accessibilityLabel(scope.rawValue)
             }
         }
@@ -301,10 +296,9 @@ struct HogHunterPanel: View {
         .accessibilityAddTraits(selectedTab == tab ? [.isSelected] : [])
     }
 
-    /// The header names the section, and says which host it is about when the
-    /// server is the one being looked at.
+    /// Only host-specific pages name one host.
     private var pageTitle: String {
-        hostScope == .server ? "Server \(selectedTab.rawValue)" : selectedTab.rawValue
+        selectedTab == .overview ? "Overview" : "\(hostScope.rawValue) \(selectedTab.rawValue)"
     }
 
     private func tabSymbol(_ tab: PanelTab) -> String {
@@ -331,42 +325,9 @@ struct HogHunterPanel: View {
         }
     }
 
-    /// The server's answer for the selected section.
-    ///
-    /// The snapshot carries the server's CPU, memory, disks, app databases,
-    /// directories and tool states, so each section shows the part of it that
-    /// belongs there.  The two sections the snapshot cannot answer say so
-    /// plainly instead of showing the same card every other section shows.
-    private var serverOverview: some View {
-        GeometryReader { geometry in
-            VStack(alignment: .leading, spacing: 12) {
-                ScrollView {
-                    VPSResourceCardView(store: store.maintain.vpsStore, showsProcesses: false,
-                                            control: store.serverControl, maintenance: store.serverMaintenance)
-                        .background(GeometryReader { summary in
-                            Color.clear.preference(key: ServerOverviewSummaryHeight.self, value: summary.size.height)
-                        })
-                }
-                .frame(height: min(serverOverviewSummaryHeight, geometry.size.height * 0.45))
-                .onPreferenceChange(ServerOverviewSummaryHeight.self) { height in
-                    if height > 0 { serverOverviewSummaryHeight = height }
-                }
-                Text("Top Activity").font(.headline)
-                serverActivityColumn()
-                    .frame(minHeight: 100, maxHeight: .infinity, alignment: .topLeading)
-                ServerControlOutcomeView(control: serverActivityControl, font: .caption)
-            }
-        }
-    }
-
     private var serverPage: some View {
         VStack(alignment: .leading, spacing: 12) {
             switch selectedTab {
-            case .activity:
-                // The card below carries the server's CPU and memory, the
-                // processes it is running and the workloads they belong to.
-                Text("The server's busiest processes, and the Coolify workloads they belong to.")
-                    .foregroundStyle(.secondary)
             case .network:
                 Text("Remote per-process connections and network rates are unavailable.")
                     .foregroundStyle(.secondary)
@@ -379,7 +340,7 @@ struct HogHunterPanel: View {
                         .font(.headline)
                     remoteMaintenanceCard
                 }
-            case .overview:
+            case .overview, .activity:
                 EmptyView()
             }
             if let section = Self.serverSection(for: selectedTab) {
@@ -420,16 +381,25 @@ struct HogHunterPanel: View {
                         .fill(Color(nsColor: .controlBackgroundColor))
                 )
             }
+            if store.hasBaseline {
+                Text("\(store.pulse.coreCount) cores · \(store.pulse.readableProcessCount) readable processes")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             HStack(spacing: 10) {
-                cpuHistoryCard.frame(width: 170)
+                cpuHistoryCard
                 Meter(title: "Memory", value: store.pulse.memoryPercent,
                       caption: store.memorySizeCaption,
                       severity: Severity.forPressure(store.pulse.pressure),
                       accessibilityDetail: store.memoryCaption)
-                    .frame(width: 170)
-                Spacer(minLength: 0)
+                if store.pulse.swapTotalBytes > 0 {
+                    Meter(title: "Swap",
+                          value: Double(store.pulse.swapUsedBytes) / Double(store.pulse.swapTotalBytes) * 100,
+                          caption: "\(HogFormat.memory(store.pulse.swapUsedBytes)) of \(HogFormat.memory(store.pulse.swapTotalBytes)) swapped",
+                          severity: Severity.forPressure(store.pulse.pressure))
+                }
             }
-            .frame(height: 75)
+            .frame(height: 82)
             pillRow(memoryPills + thermalPills)
             captions
             controls
@@ -439,38 +409,31 @@ struct HogHunterPanel: View {
     }
 
     private var overview: some View {
-        // One scroll region for the whole page: the cards, captions, and
-        // activity rows all travel together, instead of the summary hogging
-        // the height with its own scrollbar above a clipped process strip
-        // with two more.
+        // One scroll region for host summaries; process and workload lists
+        // live on Activity instead of inside a second scroll region.
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 10) {
-                    cpuHistoryCard
-                        .frame(maxHeight: .infinity)
-                    Meter(title: "Memory", value: store.pulse.memoryPercent,
-                          caption: store.memorySizeCaption,
-                          severity: Severity.forPressure(store.pulse.pressure),
-                          accessibilityDetail: store.memoryCaption)
-                        .frame(maxHeight: .infinity)
-                    if store.pulse.swapTotalBytes > 0 {
-                        // The server Overview shows swap as a meter with used and total;
-                        // the Mac only had a "Swapped" pill with no total.
-                        Meter(title: "Swap",
-                              value: Double(store.pulse.swapUsedBytes) / Double(store.pulse.swapTotalBytes) * 100,
-                              caption: "\(HogFormat.memory(store.pulse.swapUsedBytes)) of \(HogFormat.memory(store.pulse.swapTotalBytes)) swapped",
-                              severity: Severity.forPressure(store.pulse.pressure))
-                            .frame(maxHeight: .infinity)
+                Text("CPU, memory, and storage across both hosts. Open Activity for processes and workloads.")
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("This Mac Activity") {
+                        hostScope = .mac
+                        selectedTab = .activity
                     }
+                    Button("Server Activity") {
+                        hostScope = .server
+                        selectedTab = .activity
+                    }
+                    if store.isStale { lateReadingsControl }
                 }
-                .frame(height: 94)
-                pillRow(memoryPills + thermalPills)
-                capacityCards
-                if !store.maintain.vpsStore.configuredHost.isEmpty {
-                    serverStrip
+                cpuSection
+                ramSection
+                storageSection
+                if store.maintain.vpsStore.configuredHost.isEmpty {
+                    Text("No server configured. Set an SSH host in Settings to see server readings.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-                captions
-                activitySection(unified: true)
             }
         }
         .background(
@@ -478,7 +441,7 @@ struct HogHunterPanel: View {
                 Color.clear.preference(key: OverviewScrollViewportHeight.self, value: viewport.size.height)
             }
         )
-        .accessibilityLabel("Overview, scroll for activity")
+        .accessibilityLabel("Overview of Mac and server resources")
     }
 
     /// Shared by the menu bar and the dashboard.  Clicking it reads the Mac again.
@@ -513,6 +476,16 @@ struct HogHunterPanel: View {
                     lateReadingsControl
                 }
                 Spacer()
+                Button("Cleaner", systemImage: "sparkles") {
+                    HogActions.hidePanels()
+                    DetachedWindowManager.shared.openCleaner(store: store)
+                }
+                .help("Open Disk Cleaner")
+                Button("Dashboard", systemImage: "rectangle.split.2x1") {
+                    HogActions.hidePanels()
+                    DetachedWindowManager.shared.openDetachedWindow(store: store)
+                }
+                .help("Open Dashboard")
                 settingsMenu
             }
 
@@ -555,24 +528,6 @@ struct HogHunterPanel: View {
                 }
             }
 
-            Divider()
-
-            // Footer
-            HStack {
-                Button("Open Dashboard") {
-                    DetachedWindowManager.shared.openDetachedWindow(store: store)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-
-                Spacer()
-
-                Button("Open Cleaner…") {
-                    DetachedWindowManager.shared.openCleaner(store: store)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
         }
         .font(.system(size: 11))
         .padding(.horizontal, 14)
@@ -640,6 +595,7 @@ struct HogHunterPanel: View {
                     }
                     if issues.count > 3 {
                         Button("View All \(issues.count) Alerts") {
+                            HogActions.hidePanels()
                             DetachedWindowManager.shared.openActivity(store: store)
                         }
                         .buttonStyle(.link)
@@ -777,7 +733,11 @@ struct HogHunterPanel: View {
                     .foregroundStyle(.primary)
             }
 
-            CpuHistoryBarsView(history: store.cpuMinuteHistory, height: 26)
+            if isQuickView {
+                CpuHistoryBarsView(history: store.cpuMinuteHistory, height: 26)
+            } else {
+                DashboardCpuHistoryView(history: store.cpuMinuteHistory, height: 30)
+            }
 
             Text("\(store.pulse.coreCount) cores · \(HogFormat.percent(store.pulse.cpuPercent / 100)) total")
                 .font(.system(size: 8.5))
@@ -826,7 +786,11 @@ struct HogHunterPanel: View {
                 }
             }
 
-            CpuHistoryBarsView(history: store.maintain.vpsStore.cpuHistory, height: 26)
+            if isQuickView {
+                CpuHistoryBarsView(history: store.maintain.vpsStore.cpuHistory, height: 26)
+            } else {
+                DashboardCpuHistoryView(history: store.maintain.vpsStore.cpuHistory, height: 30)
+            }
 
             if let cpu {
                 Text("\(cpu.cores) cores · Load \(String(format: "%.2f", cpu.load1))")
@@ -1505,7 +1469,8 @@ struct HogHunterPanel: View {
 
     /// What the panel is showing, for screen readers.
     private var panelAccessibilityLabel: String {
-        if isQuickView { return "Hog Hunter — this Mac quick view" }
+        if isQuickView { return "Hog Hunter — quick view" }
+        if selectedTab == .overview { return "Hog Hunter — overview of both hosts" }
         if hostScope == .server {
             switch selectedTab {
             case .overview: return "Hog Hunter — server overview"
@@ -1587,20 +1552,6 @@ struct HogHunterPanel: View {
 
     // MARK: - Server
 
-    /// The remote server's headline, on Overview and the quick view.  Hidden when
-    /// no host is configured: with no server there is nothing to report, and
-    /// the Server tab says how to set one up.
-    @ViewBuilder
-    private var serverStrip: some View {
-        if !store.maintain.vpsStore.configuredHost.isEmpty {
-            VPSStatusStripView(store: store.maintain.vpsStore) {
-                hostScope = .server
-                selectedTab = .overview
-                if isQuickView { DetachedWindowManager.shared.openDetachedWindow(store: store) }
-            }
-        }
-    }
-
     // MARK: - Meters
 
     private var cpuHistoryCard: some View {
@@ -1612,7 +1563,7 @@ struct HogHunterPanel: View {
                     .monospacedDigit()
             }
             .font(.system(size: 11))
-            CpuHistoryBarsView(history: store.cpuMinuteHistory)
+            DashboardCpuHistoryView(history: store.cpuMinuteHistory, height: 30)
             Text("30 min")
                 .font(.system(size: 8))
                 .foregroundStyle(.secondary)

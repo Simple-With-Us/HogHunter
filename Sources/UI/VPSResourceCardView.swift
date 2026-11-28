@@ -41,8 +41,6 @@ struct VPSResourceCardView: View {
     @Environment(\.openSettings) private var openSettings
     /// Which part of the snapshot this card shows.
     var section: VPSResourceSection = .all
-    /// The overview keeps its process list in a separate, height-filling scroll area.
-    var showsProcesses = true
     /// The store's shared controls when the caller passes them, so the
     /// card's menus refuse while another surface's server action runs.
     @StateObject private var control: ServerControl
@@ -50,11 +48,10 @@ struct VPSResourceCardView: View {
     @State private var showFullError = false
 
     @MainActor
-    init(store: VPSStatusStore, section: VPSResourceSection = .all, showsProcesses: Bool = true,
+    init(store: VPSStatusStore, section: VPSResourceSection = .all,
          control: ServerControl? = nil, maintenance: ServerMaintenanceControl? = nil) {
         _store = ObservedObject(wrappedValue: store)
         self.section = section
-        self.showsProcesses = showsProcesses
         _control = StateObject(wrappedValue: control ?? ServerControl())
         _maintenance = StateObject(wrappedValue: maintenance ?? ServerMaintenanceControl())
     }
@@ -71,13 +68,16 @@ struct VPSResourceCardView: View {
                     loadingView
                 } else if let snapshot = store.snapshot {
                     snapshotContent(snapshot)
+                    if section == .activity {
+                        ServerControlOutcomeView(control: control)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
         .overlay(alignment: .bottomLeading) {
-            if let outcome = control.lastOutcome {
+            if section != .activity, let outcome = control.lastOutcome {
                 Text(outcome.message)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
@@ -218,7 +218,7 @@ struct VPSResourceCardView: View {
             if section.showsHeadline, let pressure = snapshot.memoryPressure {
                 pagingReadings(pressure)
             }
-            if section.showsHeadline, let diagnostics = snapshot.storageDiagnostics {
+            if section.showsDevices, let diagnostics = snapshot.storageDiagnostics {
                 storageReadings(diagnostics)
             }
 
@@ -228,12 +228,21 @@ struct VPSResourceCardView: View {
             let tools = section.showsTools ? (snapshot.toolStatuses ?? []) : []
             let dirs = section.showsDirectories ? (snapshot.largestDirs ?? []) : []
             let workloads = section.showsCoolify ? (snapshot.coolify ?? []) : []
-            let processes = section.showsProcesses && showsProcesses ? (snapshot.processes ?? []) : []
-            if !processes.isEmpty {
-                processesView(processes)
-            }
-            if !workloads.isEmpty {
-                coolifyView(workloads)
+            let processes = section.showsProcesses ? (snapshot.processes ?? []) : []
+            if section == .activity {
+                Divider()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        processesView(processes)
+                        if !workloads.isEmpty { coolifyView(workloads) }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                .frame(maxHeight: .infinity, alignment: .topLeading)
+                .accessibilityLabel("Server processes and Coolify workloads")
+            } else {
+                if !processes.isEmpty { processesView(processes) }
+                if !workloads.isEmpty { coolifyView(workloads) }
             }
             if !dirs.isEmpty && (!dbs.isEmpty || !tools.isEmpty) {
                 HStack(alignment: .top, spacing: 16) {
@@ -317,8 +326,7 @@ struct VPSResourceCardView: View {
                     .font(.system(size: 11, weight: .bold, design: .rounded))
                     .foregroundStyle(.primary)
             }
-            ProgressView(value: min(max(cpu.pct / 100, 0), 1))
-                .tint(cpu.severity.color)
+            DashboardCpuHistoryView(history: store.cpuHistory, height: 26)
             Text("\(cpu.cores) cores • 1m load: \(String(format: "%.2f", cpu.load1))")
                 .font(.system(size: 10).monospacedDigit())
                 .foregroundStyle(.secondary)
@@ -524,7 +532,7 @@ struct VPSResourceCardView: View {
                     .foregroundStyle(.secondary)
             }
             VStack(alignment: .leading, spacing: 3) {
-                ForEach(processes.prefix(12)) { process in
+                ForEach(processes) { process in
                     HStack(spacing: 8) {
                         Text(process.name)
                             .font(.system(size: 11))
