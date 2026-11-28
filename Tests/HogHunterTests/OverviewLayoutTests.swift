@@ -172,19 +172,13 @@ final class OverviewLayoutTests: XCTestCase {
         XCTAssertGreaterThan(tall, short + 150, "the scroll did not grow with the window (short \(Int(short))pt, tall \(Int(tall))pt)")
     }
 
-    /// **The dashboard scroll.**  The activity rows lived in a fixed strip
-    /// with its own scrollbar while the summary above scrolled separately,
-    /// so the processes were a tiny area at the bottom.  The rows now size
-    /// their own block inside the one Overview scroll: seven rows must stand
-    /// a full row-set taller than none.
-    func testActivityRowsSizeTheScrollContent() throws {
+    /// Overview is a summary even when the host has active processes.
+    func testOverviewDoesNotEmbedTheActivityList() throws {
         let suiteName = "hh-overview-layout-\(UUID().uuidString)"
         let suite = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { suite.removePersistentDomain(forName: suiteName) }
-        let empty = try overviewActivityHeight(in: minimumSize, preferences: suite, processRows: [])
-        let full = try overviewActivityHeight(in: minimumSize, preferences: suite, processRows: nil)
-        XCTAssertGreaterThan(full - empty, 100,
-            "seven rows stand only \(Int(full - empty))pt taller than none (empty \(Int(empty))pt, full \(Int(full))pt)")
+        let height = try overviewActivityHeight(in: minimumSize, preferences: suite, processRows: nil)
+        XCTAssertEqual(height, 0, "Overview must route to Activity rather than duplicating its process list")
     }
 
     /// The panel must fit within the height it is offered rather than asking

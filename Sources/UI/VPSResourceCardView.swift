@@ -218,7 +218,7 @@ struct VPSResourceCardView: View {
             if section.showsHeadline, let pressure = snapshot.memoryPressure {
                 pagingReadings(pressure)
             }
-            if section.showsHeadline, let diagnostics = snapshot.storageDiagnostics {
+            if section.showsDevices, let diagnostics = snapshot.storageDiagnostics {
                 storageReadings(diagnostics)
             }
 
@@ -523,7 +523,7 @@ struct VPSResourceCardView: View {
                     .foregroundStyle(.secondary)
             }
             VStack(alignment: .leading, spacing: 3) {
-                ForEach(processes.prefix(12)) { process in
+                ForEach(processes) { process in
                     HStack(spacing: 8) {
                         Text(process.name)
                             .font(.system(size: 11))

@@ -407,13 +407,11 @@ struct HogHunterPanel: View {
     }
 
     private var overview: some View {
-        // One scroll region for the whole page: the cards, captions, and
-        // activity rows all travel together, instead of the summary hogging
-        // the height with its own scrollbar above a clipped process strip
-        // with two more.
+        // One scroll region for host summaries; process and workload lists
+        // live on Activity instead of inside a second scroll region.
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("CPU, memory, storage and busiest processes across both hosts.")
+                Text("CPU, memory, and storage across both hosts. Open Activity for processes and workloads.")
                     .foregroundStyle(.secondary)
                 HStack {
                     Button("This Mac Activity") {
@@ -434,7 +432,6 @@ struct HogHunterPanel: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                activitySection(unified: true)
             }
         }
         .background(
@@ -442,7 +439,7 @@ struct HogHunterPanel: View {
                 Color.clear.preference(key: OverviewScrollViewportHeight.self, value: viewport.size.height)
             }
         )
-        .accessibilityLabel("Overview, scroll for activity")
+        .accessibilityLabel("Overview of Mac and server resources")
     }
 
     /// Shared by the menu bar and the dashboard.  Clicking it reads the Mac again.
