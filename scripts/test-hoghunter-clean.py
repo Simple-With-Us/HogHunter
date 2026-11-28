@@ -5957,6 +5957,87 @@ def test_agent_state_prunes_idle_muse_worktree_next_cache(hh):
         assert cand.recheck() is not None, "recheck must block delete if cache became active"
 
 
+DOCKER_DF = """TYPE            TOTAL     ACTIVE    SIZE      RECLAIMABLE
+Images          12        2         9.1GB     3.62GB (39%)
+Containers      3         0         1.39GB    1.39GB (100%)
+Local Volumes   4         0         1.79GB    1.79GB (100%)
+Build Cache     40        0         {cache}
+"""
+
+
+def _docker_stub(df, dangling="", running=""):
+    calls = []
+
+    def fake_run(cmd, timeout=20):
+        calls.append(list(cmd))
+        if cmd[:3] == ["docker", "system", "df"]:
+            return df
+        if cmd[:3] == ["docker", "image", "ls"]:
+            return dangling
+        return ""
+
+    def fake_run_full(cmd, timeout=20):
+        calls.append(list(cmd))
+        return running, "", 0
+
+    return calls, fake_run, fake_run_full
+
+
+def test_docker_rule_never_prunes_containers_or_volumes(hh):
+    """A safe-tier rule runs unattended: stopped containers hold work in their writable layer and volumes hold data,
+    so the candidate and the commands it runs name only the build cache and dangling images."""
+    calls, fake_run, fake_run_full = _docker_stub(DOCKER_DF.format(cache="2.5GB"))
+    with mock.patch.object(shutil, "which", return_value="/usr/local/bin/docker"), \
+            mock.patch.object(hh, "proc_count", return_value=0), \
+            mock.patch.object(hh, "_run", side_effect=fake_run), \
+            mock.patch.object(hh, "_run_full", side_effect=fake_run_full):
+        cands = hh.rule_docker()
+        assert len(cands) == 1 and cands[0].op == "docker-prune-cache", cands
+        assert "volume" in cands[0].detail and "never touched" in cands[0].detail
+        hh.apply_candidate(cands[0])
+    issued = [" ".join(c) for c in calls]
+    assert "docker builder prune --force" in issued, issued
+    assert "docker image prune --force" in issued, issued
+    for line in issued:
+        assert " volume " not in f" {line} " and "system prune" not in line, line
+        assert "container prune" not in line and " -a" not in line and "--all" not in line, line
+
+
+def test_docker_rule_ignores_reclaimable_volumes_and_containers_alone(hh):
+    """Reclaimable stopped containers or volumes are no reason to run: with a zero build cache and no dangling image
+    the rule reports nothing, so it never reaches the data-bearing rows."""
+    calls, fake_run, fake_run_full = _docker_stub(DOCKER_DF.format(cache="0B"))
+    with mock.patch.object(shutil, "which", return_value="/usr/local/bin/docker"), \
+            mock.patch.object(hh, "proc_count", return_value=0), \
+            mock.patch.object(hh, "_run", side_effect=fake_run):
+        assert hh.rule_docker() == []
+    _c, fake_run2, _f = _docker_stub(DOCKER_DF.format(cache="0B"), dangling="sha256:abc\n")
+    with mock.patch.object(shutil, "which", return_value="/usr/local/bin/docker"), \
+            mock.patch.object(hh, "proc_count", return_value=0), \
+            mock.patch.object(hh, "_run", side_effect=fake_run2):
+        assert len(hh.rule_docker()) == 1, "a dangling image alone is reclaimable"
+
+
+def test_docker_apply_stops_when_a_container_is_running(hh):
+    calls, fake_run, fake_run_full = _docker_stub(DOCKER_DF.format(cache="2.5GB"), running="abc123\n")
+    cand = hh.Candidate(category="docker", path="/x", bytes=0, reason="d", op="docker-prune-cache")
+    with mock.patch.object(hh, "_run", side_effect=fake_run), \
+            mock.patch.object(hh, "_run_full", side_effect=fake_run_full):
+        hh.apply_candidate(cand)
+    assert cand.error == "running containers; aborting prune", cand.error
+    assert [c for c in calls if "prune" in c] == [], calls
+
+
+def test_docker_policy_row_matches_the_engine_op(hh):
+    import json
+    policy = json.loads((ENGINE.parent.parent / "config" / "reclaim-policy.json").read_text())
+    rows = [r for group in policy.values() if isinstance(group, list) for r in group
+            if isinstance(r, dict) and r.get("name") == "docker"]
+    assert len(rows) == 1, rows
+    assert rows[0]["op"] == "docker-prune-cache" and rows[0]["tier"] == "safe", rows[0]
+    assert "volume" in rows[0]["$rationale"] and "container" in rows[0]["$rationale"]
+
+
 def main() -> int:
     hh = load_engine()
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

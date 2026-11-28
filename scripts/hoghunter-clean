@@ -2405,16 +2405,34 @@ def rule_brew() -> list[Candidate]:
 
 
 
+def _docker_build_cache_reclaimable(df_output: str) -> bool:
+    """True when the `Build Cache` row of `docker system df` reports a reclaimable size above zero."""
+    for ln in df_output.splitlines():
+        parts = ln.split()
+        if len(parts) < 5 or " ".join(parts[:2]).lower() != "build cache":
+            continue
+        # Columns: TYPE TOTAL ACTIVE SIZE RECLAIMABLE.  RECLAIMABLE is a size and
+        # usually a percent such as "3.62GB (31%)"; read the size token either way,
+        # with the unit multipliers docker prints (B, kB, MB, GB, TB).
+        token = parts[-2] if re.fullmatch(r"\(\d+%\)", parts[-1]) else parts[-1]
+        m = re.fullmatch(r"([0-9.]+)(TB|GB|MB|kB|B)", token)
+        if m:
+            mult = {"B": 1, "kB": 10**3, "MB": 10**6, "GB": 10**9, "TB": 10**12}[m.group(2)]
+            return float(m.group(1)) * mult > 0
+    return False
+
+
 def rule_docker() -> list[Candidate]:
-    """Unused Docker images, containers, volumes, and build cache.
+    """Docker build cache and dangling images: regenerable bytes, nothing a user keeps.
 
     The docker CLI on this Mac talks to OrbStack (context: orbstack), whose
-    socket lives at ~/.orbstack/run/docker.sock. `docker system prune`
-    removes stopped containers, dangling images, unused networks, and build
-    cache -- nothing a running container needs. `docker volume prune`
-    removes volumes no container references. Tagged images are left alone:
-    they cost nothing to re-pull and a fleet host may need them again
-    between runs.
+    socket lives at ~/.orbstack/run/docker.sock.  This rule is in the safe tier,
+    which runs unattended, so it touches only what a rebuild or a re-pull brings
+    back: the build cache (`docker builder prune`) and dangling, untagged images
+    (`docker image prune`, never `-a`).  It does not remove stopped containers
+    (their writable layer can hold work) and it does not remove volumes of any
+    kind: a stopped database's anonymous volume, and with `--all` any named
+    volume, are user data, and `docker system prune` would unreference them.
     """
     if not shutil.which("docker"):
         return []
@@ -2426,36 +2444,16 @@ def rule_docker() -> list[Candidate]:
     # re-checked at apply time via `docker ps -q`.
     if proc_count("docker") or proc_count("dockerd") or proc_count("containerd"):
         return []
-    out = _run(["docker", "system", "df"], timeout=probe_timeout(30))
-    if not out:
-        return []
-    # docker system df prints a summary table; any reclaimable number
-    # above zero means there is something to prune.
-    reclaimable = False
-    for ln in out.splitlines():
-        if "Reclaimable" in ln or "reclaimable" in ln:
-            continue
-        parts = ln.split()
-        if len(parts) >= 4:
-            # Columns: TYPE TOTAL ACTIVE SIZE RECLAIMABLE
-            # RECLAIMABLE is usually two tokens, a size and a percent like
-            # "3.62GB (31%)"; when the percent token is absent the size is
-            # the last token itself.  Parse the size token either way, with
-            # the unit multipliers docker prints (B, kB, MB, GB, TB).
-            token = parts[-2] if re.fullmatch(r"\(\d+%\)", parts[-1]) else parts[-1]
-            m = re.fullmatch(r"([0-9.]+)(TB|GB|MB|kB|B)", token)
-            if m:
-                mult = {"B": 1, "kB": 10**3, "MB": 10**6, "GB": 10**9, "TB": 10**12}[m.group(2)]
-                if float(m.group(1)) * mult > 0:
-                    reclaimable = True
-                    break
-    if not reclaimable:
+    df = _run(["docker", "system", "df"], timeout=probe_timeout(30))
+    dangling = _run(["docker", "image", "ls", "--filter", "dangling=true", "--quiet"],
+                    timeout=probe_timeout(30))
+    if not _docker_build_cache_reclaimable(df or "") and not (dangling or "").strip():
         return []
     return [Candidate(
         category="docker", path=os.path.expanduser("~/.orbstack/run/docker.sock"), bytes=0,
-        reason="docker system df reports reclaimable images, containers, volumes, or build cache",
-        op="docker-system-prune",
-        detail="docker system prune + docker volume prune; tagged images never touched; volume prune removes all unreferenced volumes, including named ones",
+        reason="docker has build cache or dangling images that a rebuild or re-pull brings back",
+        op="docker-prune-cache",
+        detail="docker builder prune + docker image prune (dangling only); containers, volumes and tagged images are never touched",
     )]
 
 
@@ -4642,7 +4640,7 @@ RULES: dict[str, tuple[Callable[[], list[Candidate]], str]] = {
     "logs": (rule_unbounded_logs, "Unbounded logs (tail-truncated)"),
     "sqlite-wal": (rule_sqlite_wals, "Oversized SQLite WAL (checkpointed)"),
     "brew": (rule_brew, "Homebrew obsolete versions"),
-    "docker": (rule_docker, "Unused Docker images, containers, volumes, build cache"),
+    "docker": (rule_docker, "Docker build cache and dangling images"),
     "xcode-scratch": (rule_xcode_scratch, "Xcode DerivedData roots left in /private/tmp and ~/.clutch"),
     "tmp-build-trees": (rule_tmp_build_trees, "Agent build and rebase checkouts in /private/tmp (report only)"),
     "tmp-large-trees": (rule_tmp_large_trees, "Large trees under /private/tmp, any name (report only)"),
@@ -5065,7 +5063,7 @@ def apply_candidate(c: Candidate) -> None:
             _run(["/opt/homebrew/bin/brew", "cleanup", "--prune=all"], timeout=op_timeout(600))
             freed, err = 0, ""
 
-        elif c.op == "docker-system-prune":
+        elif c.op == "docker-prune-cache":
             # Re-check for running containers at apply time so we don't race
             # a daemon that started between rule evaluation and apply.
             ps_out, _ps_err, ps_rc = _run_full(["docker", "ps", "-q"], timeout=probe_timeout(15))
@@ -5075,8 +5073,10 @@ def apply_candidate(c: Candidate) -> None:
             if ps_out.strip():
                 c.error = "running containers; aborting prune"
                 return
-            _run(["docker", "system", "prune", "--force"], timeout=op_timeout(600))
-            _run(["docker", "volume", "prune", "--force"], timeout=op_timeout(300))
+            # Build cache and dangling images only.  No `system prune` (it removes
+            # stopped containers) and no `volume prune` (volumes are user data).
+            _run(["docker", "builder", "prune", "--force"], timeout=op_timeout(600))
+            _run(["docker", "image", "prune", "--force"], timeout=op_timeout(300))
             freed, err = 0, ""
         else:
             return
