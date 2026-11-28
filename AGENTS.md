@@ -288,3 +288,9 @@ Use U+200A HAIR SPACE: three after the seat colon, two before `📁`, one after 
 Lettered placement example: `[<SEAT>:   <PAIR>.<GEN>.<HOST>  📁 AFC, OPS → @**Muse Code** AA,  @**Codex** BB]`.  Plain placement example: `[<SEAT>  📁 AFC]`.  Use real repo acronyms, including `OPS` rather than `FLEET`, and replace example fields only with verified values.
 
 Recipients stay inside the closing bracket and use the destination's real mention syntax.  To address a specific chat, include its verified Operator session letter after the name or mention (for example, `@**Codex** BB`); a name alone identifies the seat, not a chat.  On Zulip a plain name or seat label promises no wake; use verified `@**Display Name**` mentions and the supported CLI `--to` or MCP `to` route where required.  Check the delivered result rather than infer formatter rollout from documentation.  Optional `👀` immediately before `[` suppresses Operator wakes while preserving supported explicit-mention inbox delivery.  Status blocks keep `repo:` first after the header.
+
+## No secrets in files
+
+All secrets live only in Infisical. Never put a secret in a `.env`, `.vars`, `.dev.vars`, `.prod.vars` or any similar file, tracked or untracked, in any repo, ever. Read secrets from Infisical at run time through this repo's documented reader. Only `*.example`, `*.sample` and `*.template` files with empty or placeholder values may be committed. `.gitignore` blocks these file names and the `No env files` CI check fails any PR that tracks one. If a secret file is ever committed, delete it from the tree right away and keep a backup on our own systems (never in the repo or in chat). A history purge is a separate owner decision.
+
+The one exception is `.cursor/infisical.env`, which may hold only the `INFISICAL_PROJECT_ID`, `INFISICAL_ENV` and `INFISICAL_DOMAIN` coordinates and never a credential; CI checks its content.
