@@ -313,7 +313,7 @@ final class StorageGrowthLayoutTests: XCTestCase {
         }
     }
 
-    func testOverviewActivityUsesRemainingHeightWithMacAndServerStops() async throws {
+    func testOverviewFitsAndHostActivityScrollsWithFullProcessLists() async throws {
         let suite = "hh-overview-scroll-\(UUID().uuidString)"
         let preferences = UserDefaults(suiteName: suite)!
         defer { preferences.removePersistentDomain(forName: suite) }
@@ -358,7 +358,9 @@ final class StorageGrowthLayoutTests: XCTestCase {
             XCTAssertLessThanOrEqual(host.fittingSize.width, size.width + 1)
             XCTAssertLessThanOrEqual(host.fittingSize.height, size.height + 1)
             try render(host, size: size, name: "hh-overview-" + name)
-            try render(host, size: size, name: "hh-overview-" + name + "-scrolled", scrollToEnd: true)
+            if quick {
+                try render(host, size: size, name: "hh-overview-" + name + "-scrolled", scrollToEnd: true)
+            }
         }
         let drives = MountedDriveStore(probe: {
             (1...12).map { index in
@@ -377,15 +379,19 @@ final class StorageGrowthLayoutTests: XCTestCase {
             .environmentObject(store).defaultAppStorage(preferences).frame(width: 860, height: 580))
         crowdedDashboard.appearance = NSAppearance(named: .aqua)
         try render(crowdedDashboard, size: CGSize(width: 860, height: 580), name: "hh-overview-many-drives-minimum")
-        try render(crowdedDashboard, size: CGSize(width: 860, height: 580), name: "hh-overview-many-drives-minimum-scrolled", scrollToEnd: true)
-        preferences.set("Server", forKey: "dashboardHostScope")
-        for (name, size) in [("minimum", CGSize(width: 860, height: 580)),
-                             ("grown", CGSize(width: 1050, height: 780))] {
-            let host = NSHostingView(rootView: HogHunterPanel().environmentObject(store)
-                .defaultAppStorage(preferences).frame(width: size.width, height: size.height))
-            host.appearance = NSAppearance(named: .aqua)
-            try render(host, size: size, name: "hh-overview-server-" + name)
-            try render(host, size: size, name: "hh-overview-server-" + name + "-scrolled", scrollToEnd: true)
+        for scope in HogHunterPanel.HostScope.allCases {
+            preferences.set(scope.rawValue, forKey: "dashboardHostScope")
+            for (name, size) in [("minimum", CGSize(width: 860, height: 580)),
+                                 ("grown", CGSize(width: 1050, height: 780))] {
+                let host = NSHostingView(rootView: HogHunterPanel(initialTab: .activity)
+                    .environmentObject(store).defaultAppStorage(preferences)
+                    .frame(width: size.width, height: size.height))
+                host.appearance = NSAppearance(named: .aqua)
+                let hostName = scope == .mac ? "mac" : "server"
+                let filename = "hh-activity-\(hostName)-\(name)"
+                try render(host, size: size, name: filename)
+                try render(host, size: size, name: filename + "-scrolled", scrollToEnd: true)
+            }
         }
         preferences.set("This Mac", forKey: "dashboardHostScope")
         let empty = HogStore(historyURL: directory.appendingPathComponent("empty.sqlite"),
