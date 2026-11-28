@@ -61,6 +61,12 @@ bottom edge, and every widget led with the Mac.  In
 - The widget is configurable (`SelectHostIntent`, parameter Show):
   Mac and Server (the default, today's combined layout), Mac Only,
   or Server Only.  Two pinned instances can watch different machines.
+- Three more options ride along: Rank Busy By (CPU or Memory, on the
+  shared `rankedByActivity` / `rankedByMemory` total orders), Show
+  Clean Button for glance-only widgets, and Tap Opens (Overview,
+  Mac, Server, or Upkeep) through `hoghunter://open/<tab>`, which
+  `CompanionDeepLink` treats as navigation only and an unknown tab
+  still just opens the app.
 - One compact `CleanPill` replaces the medium and large hero buttons
   at every size.  On the large widget the clean card became a single
   row (label, status, pill), which also ends the bottom clipping.
