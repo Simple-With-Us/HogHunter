@@ -4432,8 +4432,11 @@ def apply_candidate(c: Candidate) -> None:
         elif c.op == "docker-system-prune":
             # Re-check for running containers at apply time so we don't race
             # a daemon that started between rule evaluation and apply.
-            running = _run(["docker", "ps", "-q"], timeout=probe_timeout(15))
-            if running and running.strip():
+            ps_out, _ps_err, ps_rc = _run_full(["docker", "ps", "-q"], timeout=probe_timeout(15))
+            if ps_rc != 0:
+                c.error = "docker ps probe failed; aborting prune"
+                return
+            if ps_out.strip():
                 c.error = "running containers; aborting prune"
                 return
             _run(["docker", "system", "prune", "--force"], timeout=op_timeout(600))
