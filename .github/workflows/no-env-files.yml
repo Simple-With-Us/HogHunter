@@ -34,7 +34,7 @@ jobs:
               echo "::error::$f may hold only INFISICAL_PROJECT_ID, INFISICAL_ENV and INFISICAL_DOMAIN"
               status=1
             fi
-            if grep -E '^[[:space:]]*#' "./$f" | grep -Eiq '(SECRET|TOKEN|PASSWORD|PASSWD|CLIENT|CREDENTIAL|API_?KEY|PRIVATE|AUTH|INFISICAL_)[A-Za-z0-9_]*=[^[:space:]]{8,}'; then
+            if grep -E '^[[:space:]]*#' "./$f" | grep -Eiq '[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]+'; then
               echo "::error::$f comment lines may not carry assignments; a credential hidden in a comment is still a committed secret"
               status=1
             fi
