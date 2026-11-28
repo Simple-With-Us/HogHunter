@@ -2227,14 +2227,17 @@ def rule_docker() -> list[Candidate]:
         parts = ln.split()
         if len(parts) >= 4:
             # Columns: TYPE TOTAL ACTIVE SIZE RECLAIMABLE
-            # RECLAIMABLE is like "3.62GB (31%)": parts[-2] is the size,
-            # parts[-1] is the percent token -- parse the size column.
-            try:
-                if float(parts[-2].replace("GB", "").replace("MB", "").replace("B", "")) > 0:
+            # RECLAIMABLE is usually two tokens, a size and a percent like
+            # "3.62GB (31%)"; when the percent token is absent the size is
+            # the last token itself.  Parse the size token either way, with
+            # the unit multipliers docker prints (B, kB, MB, GB, TB).
+            token = parts[-2] if re.fullmatch(r"\(\d+%\)", parts[-1]) else parts[-1]
+            m = re.fullmatch(r"([0-9.]+)(TB|GB|MB|kB|B)", token)
+            if m:
+                mult = {"B": 1, "kB": 10**3, "MB": 10**6, "GB": 10**9, "TB": 10**12}[m.group(2)]
+                if float(m.group(1)) * mult > 0:
                     reclaimable = True
                     break
-            except ValueError:
-                continue
     if not reclaimable:
         return []
     return [Candidate(
