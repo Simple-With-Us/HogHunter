@@ -158,6 +158,7 @@ private struct GeneralSettingsTab: View {
     @AppStorage(HogStore.Key.showMenuBarIcon) private var showMenuBarIcon: Bool = false
     @AppStorage(HogStore.Key.showMenuBarPercent) private var showMenuBarPercent: Bool = true
     @AppStorage(HogStore.Key.cpuScale) private var cpuScale = CpuScale.perCore.rawValue
+    @AppStorage(DashboardCpuChartStyle.preferenceKey) private var dashboardCpuChartStyle = DashboardCpuChartStyle.line.rawValue
 
     var body: some View {
         Form {
@@ -190,6 +191,10 @@ private struct GeneralSettingsTab: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                Picker("Dashboard CPU Chart", selection: $dashboardCpuChartStyle) {
+                    ForEach(DashboardCpuChartStyle.allCases) { Text($0.rawValue).tag($0.rawValue) }
+                }
 
                 Picker("CPU Rows Show", selection: $cpuScale) {
                     ForEach(CpuScale.allCases) {

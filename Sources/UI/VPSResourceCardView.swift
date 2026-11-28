@@ -317,8 +317,7 @@ struct VPSResourceCardView: View {
                     .font(.system(size: 11, weight: .bold, design: .rounded))
                     .foregroundStyle(.primary)
             }
-            ProgressView(value: min(max(cpu.pct / 100, 0), 1))
-                .tint(cpu.severity.color)
+            DashboardCpuHistoryView(history: store.cpuHistory, height: 26)
             Text("\(cpu.cores) cores • 1m load: \(String(format: "%.2f", cpu.load1))")
                 .font(.system(size: 10).monospacedDigit())
                 .foregroundStyle(.secondary)

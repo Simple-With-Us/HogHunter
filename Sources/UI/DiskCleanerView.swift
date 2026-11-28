@@ -246,7 +246,7 @@ struct DiskCleanerView: View {
                     }
                 }
 
-                Text("The Trash empties permanently during a scheduled run when free space is at or below this line.\u{00A0} Nothing in it can be recovered afterwards.")
+                Text(trashScheduleExplanation)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
 
@@ -254,7 +254,7 @@ struct DiskCleanerView: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             } else {
-                Text("Off.\u{00A0} Hog Hunter never deletes anything on its own until this is turned on.")
+                Text("Automatic Cleanup is off.\u{00A0} This schedule won’t empty the Trash.")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
@@ -263,6 +263,16 @@ struct DiskCleanerView: View {
         .padding(.vertical, 10)
         .padding(.horizontal, 10)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+
+    private var trashScheduleExplanation: String {
+        guard regimen.emptyTrashBelowGB != nil else {
+            return "Automatic Trash emptying is off.\u{00A0} Scheduled cleanup leaves the Trash alone."
+        }
+        if store.exclusions.isCategoryExcluded(.trash) {
+            return "Trash is excluded in Disk Cleaner.\u{00A0} Scheduled cleanup will skip it even when space is low."
+        }
+        return "Only scheduled runs can empty the Trash, and only when free space is at or below the selected limit.\u{00A0} Trash exclusions still apply.\u{00A0} This permanently deletes those items; Run Now does not empty the Trash."
     }
 
     /// The intervals the picker offers, in hours.
