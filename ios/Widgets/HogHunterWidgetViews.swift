@@ -21,12 +21,51 @@ enum HostFocus: String, AppEnum {
     var showsServer: Bool { self == .both || self == .server }
 }
 
+/// What the busy list is ranked by, the same choice the phone's
+/// Activity list offers through the Mac's sort.
+enum BusyRank: String, AppEnum {
+    case cpu
+    case memory
+
+    static var typeDisplayRepresentation: TypeDisplayRepresentation { "Rank Busy By" }
+
+    static var caseDisplayRepresentations: [BusyRank: DisplayRepresentation] {
+        [.cpu: "CPU", .memory: "Memory"]
+    }
+}
+
+/// Which phone tab a tap on the widget opens.  The raw values are the
+/// `hoghunter://open/<tab>` path names `CompanionDeepLink` accepts.
+enum WidgetTab: String, AppEnum {
+    case overview
+    case mac
+    case server
+    case upkeep
+
+    static var typeDisplayRepresentation: TypeDisplayRepresentation { "Tap Opens" }
+
+    static var caseDisplayRepresentations: [WidgetTab: DisplayRepresentation] {
+        [.overview: "Overview", .mac: "Mac", .server: "Server", .upkeep: "Upkeep"]
+    }
+
+    var url: URL { URL(string: "hoghunter://open/\(rawValue)")! }
+}
+
 struct SelectHostIntent: WidgetConfigurationIntent {
     static var title: LocalizedStringResource = "Machines"
     static var description = IntentDescription("Show your Mac, your server, or both.")
 
     @Parameter(title: "Show", default: .both)
     var hostFocus: HostFocus
+
+    @Parameter(title: "Rank Busy By", default: .cpu)
+    var busyRank: BusyRank
+
+    @Parameter(title: "Show Clean Button", default: true)
+    var showCleanButton: Bool
+
+    @Parameter(title: "Tap Opens", default: .overview)
+    var opensTab: WidgetTab
 }
 
 struct HogHunterWidgetEntry: TimelineEntry {
@@ -36,6 +75,17 @@ struct HogHunterWidgetEntry: TimelineEntry {
     let lastCleanDate: Date?
     let lastCleanBytes: String?
     var hostFocus: HostFocus = .both
+    var busyRank: BusyRank = .cpu
+    var showClean: Bool = true
+    var opensTab: WidgetTab = .overview
+
+    /// The snapshot's rows in this instance's chosen order.  Both ranks
+    /// are the shared total orders the phone Overview uses, so a widget
+    /// and the app never disagree about what busiest means.
+    var busyRows: [CompanionRow] {
+        guard let snapshot else { return [] }
+        return busyRank == .memory ? snapshot.rows.rankedByMemory() : snapshot.rows.rankedByActivity()
+    }
 }
 
 struct Provider: AppIntentTimelineProvider {
@@ -47,34 +97,42 @@ struct Provider: AppIntentTimelineProvider {
 
     /// The entry the screenshot lane renders.  It does not read the App Group,
     /// so the Clean pill is on screen even while issue #65 blocks live data.
-    static func sampleEntry(focus: HostFocus = .both) -> HogHunterWidgetEntry {
+    static func sampleEntry(focus: HostFocus = .both, busyRank: BusyRank = .cpu, showClean: Bool = true, opensTab: WidgetTab = .overview) -> HogHunterWidgetEntry {
         HogHunterWidgetEntry(
             date: Date(),
             snapshot: sampleSnapshot(),
             cleanStatus: "Ready",
             lastCleanDate: Date().addingTimeInterval(-3600),
             lastCleanBytes: "3.8 GB",
-            hostFocus: focus
+            hostFocus: focus,
+            busyRank: busyRank,
+            showClean: showClean,
+            opensTab: opensTab
         )
     }
 
     func snapshot(for configuration: SelectHostIntent, in context: Context) async -> HogHunterWidgetEntry {
-        let entry = currentEntry(focus: configuration.hostFocus)
+        let entry = currentEntry(configuration: configuration)
         // The widget gallery has no reading yet; show the fixture in the
-        // chosen focus so each option previews as it will look pinned.
+        // chosen options so each previews as it will look pinned.
         if context.isPreview, entry.snapshot == nil {
-            return Self.sampleEntry(focus: configuration.hostFocus)
+            return Self.sampleEntry(
+                focus: configuration.hostFocus,
+                busyRank: configuration.busyRank,
+                showClean: configuration.showCleanButton,
+                opensTab: configuration.opensTab
+            )
         }
         return entry
     }
 
     func timeline(for configuration: SelectHostIntent, in context: Context) async -> Timeline<HogHunterWidgetEntry> {
-        let entry = currentEntry(focus: configuration.hostFocus)
+        let entry = currentEntry(configuration: configuration)
         let nextUpdate = Calendar.current.date(byAdding: .minute, value: 5, to: Date()) ?? Date().addingTimeInterval(300)
         return Timeline(entries: [entry], policy: .after(nextUpdate))
     }
 
-    private func currentEntry(focus: HostFocus) -> HogHunterWidgetEntry {
+    private func currentEntry(configuration: SelectHostIntent) -> HogHunterWidgetEntry {
         let defaults = UserDefaults(suiteName: appGroupSuite)
         var snap: CompanionSnapshot? = nil
         if let data = defaults?.data(forKey: "last_snapshot") {
@@ -91,7 +149,10 @@ struct Provider: AppIntentTimelineProvider {
             cleanStatus: cleanStatus,
             lastCleanDate: lastCleanDate,
             lastCleanBytes: lastCleanBytes,
-            hostFocus: focus
+            hostFocus: configuration.hostFocus,
+            busyRank: configuration.busyRank,
+            showClean: configuration.showCleanButton,
+            opensTab: configuration.opensTab
         )
     }
 
@@ -319,10 +380,10 @@ struct ServerWidgetView: View {
                 Spacer(minLength: 0)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .widgetURL(URL(string: "hoghunter://open"))
+            .widgetURL(entry.opensTab.url)
         } else {
             EmptyWidgetView(title: "Hog Hunter", message: "Open Hog Hunter to see your server.")
-                .widgetURL(URL(string: "hoghunter://open"))
+                .widgetURL(entry.opensTab.url)
         }
     }
 
@@ -431,12 +492,14 @@ struct HogHunterSmallWidgetView: View {
 
                 Spacer(minLength: 0)
 
-                CleanPill(entry: entry)
+                if entry.showClean {
+                    CleanPill(entry: entry)
+                }
             }
-            .widgetURL(URL(string: "hoghunter://open"))
+            .widgetURL(entry.opensTab.url)
         } else {
             EmptyWidgetView(title: "Hog Hunter", message: "Open Hog Hunter to see your Mac.")
-                .widgetURL(URL(string: "hoghunter://open"))
+                .widgetURL(entry.opensTab.url)
         }
     }
 }
@@ -513,7 +576,7 @@ struct HogHunterMediumWidgetView: View {
                         WidgetServerBlock(server: snap.server, compact: true)
                     }
 
-                    if let topHog = snap.rows.first {
+                    if let topHog = entry.busyRows.first {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Top Hog")
                                 .font(.caption.weight(.semibold))
@@ -523,7 +586,7 @@ struct HogHunterMediumWidgetView: View {
                                     .font(.footnote.weight(.semibold))
                                     .lineLimit(1)
                                 Spacer()
-                                Text(topHog.cpuText)
+                                Text(entry.busyRank == .memory ? topHog.memoryText : topHog.cpuText)
                                     .font(.system(.caption, design: .monospaced).weight(.bold))
                                     .foregroundStyle(.primary)
                             }
@@ -533,27 +596,30 @@ struct HogHunterMediumWidgetView: View {
                     Spacer(minLength: 0)
 
                     // Clean status & button
-                    VStack(alignment: .leading, spacing: 4) {
-                        if let bytes = entry.lastCleanBytes {
-                            Text("Last: \(bytes) reclaimed")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        } else {
-                            Text("Clean: \(entry.cleanStatus)")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
+                    if entry.showClean {
+                        VStack(alignment: .leading, spacing: 4) {
+                            if let bytes = entry.lastCleanBytes {
+                                Text("Last: \(bytes) reclaimed")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            } else {
+                                Text("Clean: \(entry.cleanStatus)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
 
-                        CleanPill(entry: entry, showsReclaimedBytes: false)
+                            CleanPill(entry: entry, showsReclaimedBytes: false)
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .widgetURL(entry.opensTab.url)
         } else {
             EmptyWidgetView(title: "Hog Hunter", message: "Open Hog Hunter to see your Mac.")
-                .widgetURL(URL(string: "hoghunter://open"))
+                .widgetURL(entry.opensTab.url)
         }
     }
 }
@@ -650,7 +716,7 @@ struct HogHunterLargeWidgetView: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.primary)
 
-                    ForEach(snap.rows.prefix(3)) { row in
+                    ForEach(entry.busyRows.prefix(3)) { row in
                         HStack(spacing: 6) {
                             Image(systemName: row.isApp ? "app.fill" : "gearshape")
                                 .font(.footnote)
@@ -675,6 +741,7 @@ struct HogHunterLargeWidgetView: View {
 
                 // One compact row, not a card with a hero button: the
                 // readings above are the content, Clean is a footnote.
+                if entry.showClean {
                 HStack(spacing: 8) {
                     Label("Safe Mac Clean", systemImage: "sparkles")
                         .font(.caption.weight(.bold))
@@ -694,10 +761,12 @@ struct HogHunterLargeWidgetView: View {
                     }
                     CleanPill(entry: entry, showsReclaimedBytes: false)
                 }
+                }
             }
+            .widgetURL(entry.opensTab.url)
         } else {
             EmptyWidgetView(title: "Hog Hunter", message: "Open Hog Hunter to see your Mac.")
-                .widgetURL(URL(string: "hoghunter://open"))
+                .widgetURL(entry.opensTab.url)
         }
     }
 }

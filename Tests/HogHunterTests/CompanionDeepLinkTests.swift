@@ -15,6 +15,21 @@ final class CompanionDeepLinkTests: XCTestCase {
         XCTAssertFalse(link.requestsCleanConfirmation)
     }
 
+    func testOpenTabLinksNameEachTab() {
+        for tab in CompanionDeepLink.openableTabs {
+            let link = CompanionDeepLink.classify(URL(string: "hoghunter://open/\(tab)")!)
+            XCTAssertEqual(link, .openTab(tab))
+            XCTAssertFalse(link.requestsCleanConfirmation)
+        }
+        XCTAssertEqual(CompanionDeepLink.classify(URL(string: "HogHunter://OPEN/Server")!), .openTab("server"))
+    }
+
+    func testUnknownTabStillOpensTheApp() {
+        XCTAssertEqual(CompanionDeepLink.classify(URL(string: "hoghunter://open/")!), .openApp)
+        XCTAssertEqual(CompanionDeepLink.classify(URL(string: "hoghunter://open/settings")!), .openApp)
+        XCTAssertEqual(CompanionDeepLink.classify(URL(string: "hoghunter://open/mac/extra")!), .openApp)
+    }
+
     func testOtherLinksAreIgnored() {
         XCTAssertEqual(CompanionDeepLink.classify(URL(string: "hoghunter://run")!), .ignore)
         XCTAssertEqual(CompanionDeepLink.classify(URL(string: "https://example.com/clean")!), .ignore)

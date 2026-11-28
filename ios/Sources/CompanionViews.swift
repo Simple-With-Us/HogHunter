@@ -347,14 +347,19 @@ struct CompanionRootView: View {
 /// Renders the real widget views for `xcrun simctl io … screenshot`.
 /// Launch argument only.  The home-screen widget is the same SwiftUI.
 /// `-HogHunterWidgetServer` and `-HogHunterWidgetMac` render that host
-/// focus, and `-HogHunterWidgetLarge` renders the large size alone so
-/// its bottom row sits inside one capture.
+/// focus, `-HogHunterWidgetRankMemory` and `-HogHunterWidgetNoClean`
+/// render those options, and `-HogHunterWidgetLarge` renders the large
+/// size alone so its bottom row sits inside one capture.
 private struct WidgetScreenshotHost: View {
     private let entry: HogHunterWidgetEntry = {
         let arguments = ProcessInfo.processInfo.arguments
-        if arguments.contains("-HogHunterWidgetServer") { return Provider.sampleEntry(focus: .server) }
-        if arguments.contains("-HogHunterWidgetMac") { return Provider.sampleEntry(focus: .mac) }
-        return Provider.sampleEntry()
+        let focus: HostFocus = arguments.contains("-HogHunterWidgetServer") ? .server
+            : arguments.contains("-HogHunterWidgetMac") ? .mac : .both
+        return Provider.sampleEntry(
+            focus: focus,
+            busyRank: arguments.contains("-HogHunterWidgetRankMemory") ? .memory : .cpu,
+            showClean: !arguments.contains("-HogHunterWidgetNoClean")
+        )
     }()
     private let largeOnly = ProcessInfo.processInfo.arguments.contains("-HogHunterWidgetLarge")
 
@@ -639,6 +644,15 @@ struct DashboardView: View {
     @State private var queuedSampleOutcome: SampleOutcome?
     @State private var pendingSampleRow: CompanionRow?
     @State private var showSampleConfirm = false
+
+    /// Takes a widget tap's destination tab, if one is waiting.  The
+    /// names are `CompanionDeepLink.openableTabs`, matched against the
+    /// tab titles lowercased so the two lists cannot drift apart.
+    private func consumeTabRequest() {
+        guard let requested = model.takeTabRequest(),
+              let tab = CompanionTab.allCases.first(where: { $0.rawValue.lowercased() == requested }) else { return }
+        selectedTab = tab
+    }
 
     private func consumeCleanRequest() {
         guard model.takeCleanRequest() else { return }
@@ -1071,10 +1085,14 @@ struct DashboardView: View {
         }
         .onAppear {
             consumeCleanRequest()
+            consumeTabRequest()
             syncSortFromMac()
         }
         .onChange(of: model.showCleanDialogRequested) { _, _ in
             consumeCleanRequest()
+        }
+        .onChange(of: model.pendingTab) { _, _ in
+            consumeTabRequest()
         }
         .onChange(of: snapshot.settings?.sort) { _, _ in
             syncSortFromMac()
