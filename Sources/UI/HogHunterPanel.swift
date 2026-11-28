@@ -124,9 +124,16 @@ struct HogHunterPanel: View {
                 }
                 Divider()
                 ZStack(alignment: .topLeading) {
-                    if selectedTab == .activity && hostScope == .mac {
-                        activityContent
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    if selectedTab == .activity {
+                        Group {
+                            if hostScope == .mac {
+                                activityContent
+                            } else {
+                                VPSResourceCardView(store: store.maintain.vpsStore, section: .activity,
+                                                    control: store.serverControl, maintenance: store.serverMaintenance)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     } else if selectedTab == .overview {
                         overview
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -321,11 +328,6 @@ struct HogHunterPanel: View {
     private var serverPage: some View {
         VStack(alignment: .leading, spacing: 12) {
             switch selectedTab {
-            case .activity:
-                // The card below carries the server's CPU and memory, the
-                // processes it is running and the workloads they belong to.
-                Text("CPU, memory and top processes. Coolify workloads appear when reported by the server.")
-                    .foregroundStyle(.secondary)
             case .network:
                 Text("Remote per-process connections and network rates are unavailable.")
                     .foregroundStyle(.secondary)
@@ -338,7 +340,7 @@ struct HogHunterPanel: View {
                         .font(.headline)
                     remoteMaintenanceCard
                 }
-            case .overview:
+            case .overview, .activity:
                 EmptyView()
             }
             if let section = Self.serverSection(for: selectedTab) {
