@@ -1000,7 +1000,14 @@ extension Array where Element == CompanionRow {
     /// unlike `UsageParser.parseMemoryBytes`, `CompanionActivityText` rejects
     /// a reading at or beyond 2^64 as no reading instead of trapping.  A row
     /// with no reading at all ranks after numbered rows.
-    func rankedByActivity() -> [CompanionRow] {
+    func rankedByActivity() -> [CompanionRow] { ranked(memoryFirst: false) }
+
+    /// The same total order with memory first, for surfaces that let a
+    /// person rank the busy list by RAM instead: strictly descending
+    /// memory, then CPU, then name, then id.
+    func rankedByMemory() -> [CompanionRow] { ranked(memoryFirst: true) }
+
+    private func ranked(memoryFirst: Bool) -> [CompanionRow] {
         // Parse each row's text fallback once, not once per comparison: the
         // fallback allocates, and the comparator runs O(N log N) times per
         // snapshot update.
@@ -1014,8 +1021,13 @@ extension Array where Element == CompanionRow {
             return (row, cpu, mem)
         }
         return enriched.sorted { a, b in
-            if a.cpu != b.cpu { return a.cpu > b.cpu }
-            if a.mem != b.mem { return a.mem > b.mem }
+            if memoryFirst {
+                if a.mem != b.mem { return a.mem > b.mem }
+                if a.cpu != b.cpu { return a.cpu > b.cpu }
+            } else {
+                if a.cpu != b.cpu { return a.cpu > b.cpu }
+                if a.mem != b.mem { return a.mem > b.mem }
+            }
             // Equal names skip the ICU-backed compare entirely.
             let aName = a.row.name, bName = b.row.name
             if aName != bName {

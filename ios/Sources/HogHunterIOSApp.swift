@@ -15,10 +15,16 @@ struct HogHunterIOSApp: App {
             CompanionRootView(model: model)
                 .preferredColorScheme(colorScheme)
                 .onOpenURL { url in
-                    // A link may show the confirmation.  It never calls
-                    // triggerRemoteClean.  Only the Run Safe Clean button does.
-                    if CompanionDeepLink.classify(url).requestsCleanConfirmation {
+                    // A link may show the confirmation or switch tabs.  It
+                    // never calls triggerRemoteClean.  Only the Run Safe
+                    // Clean button does.
+                    switch CompanionDeepLink.classify(url) {
+                    case .confirmClean:
                         model.requestCleanDialog()
+                    case .openTab(let tab):
+                        model.requestTab(tab)
+                    case .openApp, .ignore:
+                        break
                     }
                 }
         }

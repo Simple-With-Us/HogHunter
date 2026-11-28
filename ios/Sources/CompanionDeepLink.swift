@@ -7,8 +7,17 @@ import Foundation
 /// Clean, and the Mac still applies its own opt-in.
 enum CompanionDeepLink: Equatable {
     case openApp
+    /// Open the app on one named tab ("overview", "mac", "server" or
+    /// "upkeep", lowercased).  Navigation only: like `openApp`, it can
+    /// never start a clean, a quit, or any other control.
+    case openTab(String)
     case confirmClean
     case ignore
+
+    /// The tab names a link may name.  Anything else under `open` still
+    /// opens the app, so a widget from a newer build never dead-ends on
+    /// an older phone app.
+    static let openableTabs = ["overview", "mac", "server", "upkeep"]
 
     static func classify(_ url: URL) -> CompanionDeepLink {
         guard url.scheme?.lowercased() == "hoghunter" else { return .ignore }
@@ -16,7 +25,8 @@ enum CompanionDeepLink: Equatable {
         case "clean":
             return .confirmClean
         case "open":
-            return .openApp
+            let tab = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+            return openableTabs.contains(tab) ? .openTab(tab) : .openApp
         default:
             return .ignore
         }

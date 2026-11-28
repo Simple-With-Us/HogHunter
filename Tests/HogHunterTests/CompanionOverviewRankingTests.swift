@@ -38,6 +38,28 @@ final class CompanionOverviewRankingTests: XCTestCase {
         XCTAssertEqual(ids(rows.rankedByActivity()), ["b", "c", "a"])
     }
 
+    /// The widget's Rank Busy By Memory option (HH-238): the same total
+    /// order with memory first, CPU as the tiebreak.
+    func testExactDescendingMemory() {
+        let rows = [
+            row("hot-small", "Hot Small", cpu: 290, memory: 680),
+            row("cool-big", "Cool Big", cpu: 85, memory: 1800),
+            row("mid", "Mid", cpu: 142, memory: 2100),
+        ]
+        XCTAssertEqual(ids(rows.rankedByMemory()), ["mid", "cool-big", "hot-small"])
+        XCTAssertEqual(ids(rows.rankedByActivity()), ["hot-small", "mid", "cool-big"])
+    }
+
+    func testMemoryTiesFallThroughCPUThenNameThenID() {
+        let rows = [
+            row("2", "Same", cpu: 5, memory: 10),
+            row("1", "Same", cpu: 5, memory: 10),
+            row("m", "B-name", cpu: 9, memory: 10),
+            row("n", "A-name", cpu: 9, memory: 10),
+        ]
+        XCTAssertEqual(ids(rows.rankedByMemory()), ["n", "m", "1", "2"])
+    }
+
     /// The reviewer-found cycle: with an epsilon of 0.05 these three rows
     /// order inconsistently depending on which pair is compared first.  The
     /// exact order is simply descending CPU; memory never gets consulted.

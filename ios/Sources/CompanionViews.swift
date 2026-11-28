@@ -1,36 +1,48 @@
 import SwiftUI
 import UIKit
 
+/// The phone's four tabs.  Overview judges every machine, Mac and Server
+/// are the two machines as peers, and Upkeep holds the jobs that change
+/// the Mac (Disk Cleaner and Maintenance).  A host is never one segment
+/// among features: the old six-way picker (Overview, Activity, Storage,
+/// Maintain, Network, Server) mixed the two axes the Mac keeps apart
+/// (`HostScope` crossed with `PanelTab` in HogHunterPanel.swift), which
+/// left Server as the smallest segment and Overview talking only about
+/// the Mac.
 enum CompanionTab: String, CaseIterable, Identifiable {
     case overview = "Overview"
-    case activity = "Activity"
-    case storage = "Storage"
-    case maintain = "Maintain"
-    case network = "Network"
+    case mac = "Mac"
     case server = "Server"
+    case upkeep = "Upkeep"
     var id: String { rawValue }
 
-    /// The same SF Symbol the Mac's window uses for this tab
-    /// (Sources/UI/HogHunterPanel.swift), so the phone's compact picker and
-    /// the Mac's tabs read as one control.
+    /// The Mac and Server symbols match the machine cards on the Server
+    /// tab, so a machine keeps one icon wherever it appears.
     var symbol: String {
         switch self {
         case .overview: return "house"
-        case .activity: return "chart.bar.xaxis"
-        case .storage: return "internaldrive"
-        case .maintain: return "wrench.and.screwdriver"
-        case .network: return "network"
+        case .mac: return "laptopcomputer"
         case .server: return "server.rack"
+        case .upkeep: return "wrench.and.screwdriver"
         }
     }
 }
 
-/// The Mac's Storage subtabs on the phone (HH-212).  The Mac names them
-/// Installed Apps, Disk Cleaner and Drives & Folders; the phone shortens the
-/// labels so the segmented picker fits.
+/// The Mac tab's three panes: the Mac window's Activity, Storage and
+/// Network tabs, scoped to the Mac now that the tab itself names the host.
+enum CompanionMacPane: String, CaseIterable, Identifiable {
+    case activity = "Activity"
+    case storage = "Storage"
+    case network = "Network"
+    var id: String { rawValue }
+}
+
+/// The viewing half of the Mac's Storage tab: Installed Apps and Drives &
+/// Folders, shortened so the segmented picker fits.  The Mac's third
+/// Storage pane, Disk Cleaner, changes the Mac rather than describing it,
+/// so it lives on the Upkeep tab beside Maintenance.
 enum CompanionStorageSubTab: String, CaseIterable, Identifiable {
     case apps = "Apps"
-    case cleaner = "Cleaner"
     case drives = "Drives"
     var id: String { rawValue }
 }
@@ -334,21 +346,41 @@ struct CompanionRootView: View {
 
 /// Renders the real widget views for `xcrun simctl io … screenshot`.
 /// Launch argument only.  The home-screen widget is the same SwiftUI.
+/// `-HogHunterWidgetServer` and `-HogHunterWidgetMac` render that host
+/// focus, `-HogHunterWidgetRankMemory` and `-HogHunterWidgetNoClean`
+/// render those options, and `-HogHunterWidgetLarge` renders the large
+/// size alone so its bottom row sits inside one capture.
 private struct WidgetScreenshotHost: View {
-    private let entry = Provider.sampleEntry()
+    private let entry: HogHunterWidgetEntry = {
+        let arguments = ProcessInfo.processInfo.arguments
+        let focus: HostFocus = arguments.contains("-HogHunterWidgetServer") ? .server
+            : arguments.contains("-HogHunterWidgetMac") ? .mac : .both
+        return Provider.sampleEntry(
+            focus: focus,
+            busyRank: arguments.contains("-HogHunterWidgetRankMemory") ? .memory : .cpu,
+            showClean: !arguments.contains("-HogHunterWidgetNoClean")
+        )
+    }()
+    private let largeOnly = ProcessInfo.processInfo.arguments.contains("-HogHunterWidgetLarge")
 
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
                 Text("Hog Hunter Widget")
                     .font(.headline)
-                HogHunterSmallWidgetView(entry: entry)
-                    .frame(width: 170, height: 170)
-                HogHunterMediumWidgetView(entry: entry)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 170)
-                HogHunterLargeWidgetView(entry: entry)
-                    .frame(maxWidth: .infinity)
+                if largeOnly {
+                    HogHunterLargeWidgetView(entry: entry)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 380)
+                } else {
+                    HogHunterSmallWidgetView(entry: entry)
+                        .frame(width: 170, height: 170)
+                    HogHunterMediumWidgetView(entry: entry)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 170)
+                    HogHunterLargeWidgetView(entry: entry)
+                        .frame(maxWidth: .infinity)
+                }
             }
             .padding()
         }
@@ -548,15 +580,23 @@ struct SampleOutcome: Identifiable {
 struct DashboardView: View {
     let snapshot: CompanionSnapshot
     @Bindable var model: CompanionModel
+    /// The screenshot lane's flags keep their old names (HH-212) and land
+    /// on the tab that now owns the surface: the Mac's three viewing panes
+    /// on the Mac tab, Maintenance and the Disk Cleaner on Upkeep, and
+    /// every Server flag on the Server tab.
     @State private var selectedTab: CompanionTab = {
         let arguments = ProcessInfo.processInfo.arguments
-        if arguments.contains("-HogHunterActivity") { return .activity }
-        if arguments.contains("-HogHunterStorage") { return .storage }
-        if arguments.contains("-HogHunterMaintain") { return .maintain }
-        if arguments.contains("-HogHunterNetwork") { return .network }
-        if arguments.contains("-HogHunterServer") { return .server }
+        if arguments.contains(where: { $0.hasPrefix("-HogHunterServer") }) { return .server }
+        if arguments.contains("-HogHunterMaintain") || arguments.contains("-HogHunterStorageCleaner") { return .upkeep }
+        if arguments.contains("-HogHunterActivity") || arguments.contains("-HogHunterStorage") || arguments.contains("-HogHunterNetwork") { return .mac }
         // The Mac opens on Overview; the phone matches (HH-212).
         return .overview
+    }()
+    @State private var macPane: CompanionMacPane = {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-HogHunterStorage") { return .storage }
+        if arguments.contains("-HogHunterNetwork") { return .network }
+        return .activity
     }()
     @State private var sortOrder: CompanionSort = .cpu
     @State private var sortAscending: Bool = false
@@ -573,7 +613,6 @@ struct DashboardView: View {
     @State private var storageSubTab: CompanionStorageSubTab = {
         let arguments = ProcessInfo.processInfo.arguments
         if arguments.contains("-HogHunterStorageApps") { return .apps }
-        if arguments.contains("-HogHunterStorageCleaner") { return .cleaner }
         return .drives
     }()
     @State private var showCleanConfirm = false
@@ -605,6 +644,15 @@ struct DashboardView: View {
     @State private var queuedSampleOutcome: SampleOutcome?
     @State private var pendingSampleRow: CompanionRow?
     @State private var showSampleConfirm = false
+
+    /// Takes a widget tap's destination tab, if one is waiting.  The
+    /// names are `CompanionDeepLink.openableTabs`, matched against the
+    /// tab titles lowercased so the two lists cannot drift apart.
+    private func consumeTabRequest() {
+        guard let requested = model.takeTabRequest(),
+              let tab = CompanionTab.allCases.first(where: { $0.rawValue.lowercased() == requested }) else { return }
+        selectedTab = tab
+    }
 
     private func consumeCleanRequest() {
         guard model.takeCleanRequest() else { return }
@@ -847,61 +895,76 @@ struct DashboardView: View {
                 .background(Color.orange.opacity(0.12))
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Tap a tab to switch view.")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .padding(.horizontal)
-                    .padding(.top, 6)
-                Picker("Tab", selection: $selectedTab) {
-                    ForEach(CompanionTab.allCases) { tab in
-                        // Labelled tabs: icon plus visible name, so the
-                        // picker is not icon-only (HH-212 names retained
-                        // for VoiceOver via the label text).
-                        Label(tab.rawValue, systemImage: tab.symbol)
-                            .labelStyle(.titleAndIcon)
-                            .font(.caption2)
-                            .tag(tab)
+            TabView(selection: $selectedTab) {
+                List {
+                    hostHeaderSection
+
+                    // Overview is where "is anything wrong?" gets asked
+                    // first, so the verdict for both machines leads it.
+                    FlaggedIssuesSection(snapshot: snapshot, canAct: issueActionAllowed, onAction: performIssueAction)
+
+                    overviewContent
+                }
+                .listStyle(.insetGrouped)
+                .refreshable { await model.refresh() }
+                .tabItem { Label(CompanionTab.overview.rawValue, systemImage: CompanionTab.overview.symbol) }
+                .tag(CompanionTab.overview)
+
+                List {
+                    hostHeaderSection
+
+                    macPanePickerSection
+
+                    // The Mac's verdict sits beside the rows it names, on
+                    // the pane where quit and tame live.
+                    if macPane == .activity {
+                        FlaggedIssuesSection(snapshot: snapshot, canAct: issueActionAllowed, onAction: performIssueAction)
+                    }
+
+                    switch macPane {
+                    case .activity:
+                        activityContent
+                    case .storage:
+                        storageContent
+                    case .network:
+                        networkContent
                     }
                 }
-                .pickerStyle(.segmented)
-                .padding(.horizontal)
-                .padding(.bottom, 6)
-            }
+                .listStyle(.insetGrouped)
+                .refreshable { await model.refresh() }
+                .tabItem { Label(CompanionTab.mac.rawValue, systemImage: CompanionTab.mac.symbol) }
+                .tag(CompanionTab.mac)
 
-            List {
-                hostHeaderSection
-
-                // The first tab a person sees and the tab about the server: the
-                // two places "is anything wrong?" gets asked.
-                if selectedTab == .overview || selectedTab == .activity || selectedTab == .server {
+                List {
                     FlaggedIssuesSection(snapshot: snapshot, canAct: issueActionAllowed, onAction: performIssueAction)
-                }
 
-                switch selectedTab {
-                case .overview:
-                    overviewContent
-                case .activity:
-                    activityContent
-                case .storage:
-                    storageContent
-                case .maintain:
-                    maintainContent
-                case .network:
-                    networkContent
-                case .server:
                     ServerTabContent(snapshot: snapshot, model: model)
                 }
-            }
-            .listStyle(.insetGrouped)
-            .refreshable {
-                // On the Server tab a pull asks the Mac to read the server too,
-                // when this phone may see it.  Anywhere else it re-polls.
-                if selectedTab == .server, issueActionAllowed(.retry) {
-                    await model.refreshServer()
-                } else {
-                    await model.refresh()
+                .listStyle(.insetGrouped)
+                .refreshable {
+                    // On the Server tab a pull asks the Mac to read the
+                    // server too, when this phone may see it.  Anywhere
+                    // else it re-polls.
+                    if issueActionAllowed(.retry) {
+                        await model.refreshServer()
+                    } else {
+                        await model.refresh()
+                    }
                 }
+                .tabItem { Label(CompanionTab.server.rawValue, systemImage: CompanionTab.server.symbol) }
+                .tag(CompanionTab.server)
+
+                List {
+                    hostHeaderSection
+
+                    maintainContent
+
+                    upkeepCleanerContent
+                }
+                .listStyle(.insetGrouped)
+                .refreshable { await model.refresh() }
+                .tabItem { Label(CompanionTab.upkeep.rawValue, systemImage: CompanionTab.upkeep.symbol) }
+                .tag(CompanionTab.upkeep)
             }
             .sheet(item: $model.serverActionOutcome) { outcome in
                 ServerActionResultView(outcome: outcome)
@@ -1022,10 +1085,14 @@ struct DashboardView: View {
         }
         .onAppear {
             consumeCleanRequest()
+            consumeTabRequest()
             syncSortFromMac()
         }
         .onChange(of: model.showCleanDialogRequested) { _, _ in
             consumeCleanRequest()
+        }
+        .onChange(of: model.pendingTab) { _, _ in
+            consumeTabRequest()
         }
         .onChange(of: snapshot.settings?.sort) { _, _ in
             syncSortFromMac()
@@ -1090,6 +1157,20 @@ struct DashboardView: View {
             } else {
                 sampleOutcome = SampleOutcome(response: response)
             }
+        }
+    }
+
+    /// The Mac tab's panes.  Three short segments fit, and the tab above
+    /// already names the host, so the picker only chooses a view of it.
+    private var macPanePickerSection: some View {
+        Section {
+            Picker("Mac Pane", selection: $macPane) {
+                ForEach(CompanionMacPane.allCases) { pane in
+                    Text(pane.rawValue).tag(pane)
+                }
+            }
+            .pickerStyle(.segmented)
+            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
         }
     }
 
@@ -1191,7 +1272,7 @@ struct DashboardView: View {
                 Text("Top Activity")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Button("Open Activity") { selectedTab = .activity }
+                Button("Open Activity") { macPane = .activity; selectedTab = .mac }
                     .font(.caption.weight(.medium))
             }
             if topRows.isEmpty {
@@ -1219,12 +1300,17 @@ struct DashboardView: View {
     }
 
 
-    /// The Mac's Overview tab on the phone (HH-212): the meters, the busiest
-    /// rows and the server's strip.  Each part opens the tab that owns it;
-    /// nothing here is a second place to manage anything.
+    /// Overview judges every machine: the Mac's meters and busiest rows
+    /// under their own header, the server's summary beside them, and the
+    /// upkeep state last.  Each part opens the tab that owns it; nothing
+    /// here is a second place to manage anything.
     @ViewBuilder
     private var overviewContent: some View {
-        Section { metersAndPills }
+        Section {
+            metersAndPills
+        } header: {
+            Text("Mac")
+        }
 
         overviewActivitySection(topRows: overviewTopRows)
 
@@ -1253,6 +1339,21 @@ struct DashboardView: View {
                 .buttonStyle(.plain)
             }
         }
+
+        Section {
+            Button { selectedTab = .upkeep } label: {
+                HStack(spacing: 8) {
+                    MaintainSummaryRow(snapshot: snapshot)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens the Upkeep tab")
+        } header: {
+            Text("Upkeep")
+        }
     }
 
     /// One line about the server for the Overview strip.  The state comes
@@ -1274,8 +1375,8 @@ struct DashboardView: View {
         }
     }
 
-    /// The Mac's Maintenance tab as its own entry (HH-212).  This is the card
-    /// that used to sit inside Storage; its destination is unchanged.
+    /// Maintenance on the Upkeep tab, above the Disk Cleaner sections.
+    /// Its destination is unchanged.
     @ViewBuilder
     private var maintainContent: some View {
         Section("Maintain") {
@@ -1581,10 +1682,9 @@ struct DashboardView: View {
             .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
         }
 
-        // The sections below keep their old order inside the Mac's three
-        // panes (HH-212): drives and folders under Drives, per-app storage and
-        // the kind-of-data totals under Apps, the cleaner and its categories
-        // and exclusions under Cleaner.  Maintain moved out to its own tab.
+        // The viewing panes keep their old order: drives and folders under
+        // Drives, per-app storage and the kind-of-data totals under Apps.
+        // The cleaner and its exclusions moved to the Upkeep tab.
         if storageSubTab == .drives {
         // Mac storage is intentionally FIRST.  Prior to 1.0.6 the iPhone-storage
         // section sat on top and several users assumed it WAS the Mac storage
@@ -1786,7 +1886,13 @@ struct DashboardView: View {
 
         }
 
-        if storageSubTab == .cleaner {
+    }
+
+    /// The Disk Cleaner half of the Upkeep tab: the safe clean, the
+    /// review-and-choose cleaner, and the exclusions both cleans honour.
+    /// It sat inside Storage while Storage mixed viewing with deleting.
+    @ViewBuilder
+    private var upkeepCleanerContent: some View {
         Section("Disk & System Clutter") {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
@@ -2035,7 +2141,6 @@ struct DashboardView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-        }
         }
     }
 

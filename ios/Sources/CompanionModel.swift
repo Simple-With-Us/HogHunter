@@ -140,6 +140,23 @@ final class CompanionModel {
         cleanRequestAt = nil
         return fresh
     }
+
+    /// The tab a `hoghunter://open/<tab>` link last named, lowercased as
+    /// `CompanionDeepLink.openTab` carries it.  Navigation only, so unlike
+    /// the Clean request it needs no freshness window: switching tabs
+    /// changes nothing on the Mac, and honouring a late tap is harmless.
+    var pendingTab: String?
+
+    /// Record a widget tap that named a destination tab.
+    func requestTab(_ tab: String) {
+        pendingTab = tab
+    }
+
+    /// Take the pending tab request, so each tap switches at most once.
+    func takeTabRequest() -> String? {
+        defer { pendingTab = nil }
+        return pendingTab
+    }
     /// The row a Sample for 3 Seconds is running on, so the row can say so and
     /// a second tap does not start a second sample.
     var samplingRowId: String?
