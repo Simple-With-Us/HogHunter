@@ -1,3 +1,4 @@
+import AppIntents
 import WidgetKit
 import SwiftUI
 
@@ -6,12 +7,12 @@ struct HogHunterWidgets: Widget {
     let kind: String = "HogHunterWidgets"
 
     var body: some WidgetConfiguration {
-        StaticConfiguration(kind: kind, provider: Provider()) { entry in
+        AppIntentConfiguration(kind: kind, intent: SelectHostIntent.self, provider: Provider()) { entry in
             HogHunterWidgetEntryView(entry: entry)
                 .containerBackground(.fill.tertiary, for: .widget)
         }
         .configurationDisplayName("Hog Hunter")
-        .description("Track Mac and server CPU and RAM.  Clean asks before anything is removed.")
+        .description("Track your Mac, your server, or both.\u{00A0} Clean asks before anything is removed.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }
