@@ -111,6 +111,18 @@
       ]
     },
     {
+      "name": "docker",
+      "tier": "safe",
+      "op": "docker-prune-cache",
+      "title": "Docker build cache and dangling images",
+      "$rationale": "Only what a rebuild or a re-pull brings back: `docker builder prune` (build cache) and `docker image prune` (dangling, untagged images; never -a). Stopped containers are left alone because their writable layer can hold work, and no volume is pruned: a stopped database's anonymous volume is user data, `docker volume prune --all` also removes named ones, and `docker system prune` would unreference both. A safe-tier rule runs unattended, so data-bearing Docker resources are out of scope for it.",
+      "skipWhenAny": [
+        "the docker daemon is not installed",
+        "a docker, dockerd, or containerd process is alive",
+        "any container is running"
+      ]
+    },
+    {
       "name": "app-caches",
       "tier": "safe",
       "op": "delete",
