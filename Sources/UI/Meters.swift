@@ -159,6 +159,8 @@ struct ContrastChip: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(Capsule().fill(Self.wash(tone)))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(text)
     }
 
     private static func ink(_ tone: Tone) -> Color { color(tone, text: true) }

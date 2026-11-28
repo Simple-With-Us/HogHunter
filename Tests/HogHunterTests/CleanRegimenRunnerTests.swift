@@ -1547,4 +1547,200 @@ final class CleanRegimenRunnerTests: XCTestCase {
         // neither owns it.
         XCTAssertTrue(CleanRegimenRunner.shared === CleanRegimenRunner.shared)
     }
+
+    // MARK: - Ask-first never runs unattended
+
+    func testSchedulableRulesNeverIncludeAskFirst() {
+        // `ask-first` is the tier nothing deletes without a human, so a
+        // regimen has no business listing it, and a stored regimen naming it
+        // loses it at `sanitized()`, which is the migration.
+        XCTAssertFalse(CleanRegimen.schedulableRules.contains("ask-first"))
+        let regimen = CleanRegimen(enabledRules: ["ask-first", "app-caches"])
+        XCTAssertEqual(regimen.sanitized().enabledRules, ["app-caches"])
+    }
+
+    func testAskFirstItemsMatchNoSchedulableRule() {
+        // Every ask-first category answers to "ask-first" and nothing else,
+        // so no schedulable rule set can select one.
+        func item(_ category: CleanCategory) -> CleanItem {
+            CleanItem(category: category, title: category.rawValue, subtitle: category.rawValue,
+                      url: URL(fileURLWithPath: "/tmp/hoghunter-regimen-ask-first"),
+                      bytes: 10, fileCount: 1, lastModified: nil, isSelected: true, detail: nil)
+        }
+        let askFirst = [CleanCategory.orphanedData, .localAIModels, .largeAndOldFiles,
+                        .staleBackups, .staleTempRepos].map(item)
+        let (pending, reason) = CleanRegimenRunner.pendingItems(
+            from: askFirst, rules: Set(CleanRegimen.schedulableRules))
+        XCTAssertTrue(pending.isEmpty, "no schedulable rule may select an ask-first item")
+        XCTAssertEqual(reason, "Nothing matched the enabled rules.")
+    }
+
+    func testARegimenNamingOnlyAskFirstSaysSoAndNeverScans() async {
+        // Even handed the unschedulable name directly, the runner sanitizes
+        // before it runs: no rules survive, so no scan walks the disk.
+        let now = Date()
+        let scans = LockedBox(0)
+        let cleans = LockedBox(0)
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in
+                scans.value += 1
+                return CleanScanReport(categories: [], totalBytes: 0, totalSelectedBytes: 0, scannedAt: now)
+            },
+            cleanProvider: { _, _, _ in
+                cleans.value += 1
+                return CleanResult(bytesReclaimed: 0, itemsRemoved: 0, errors: [], cleanedAt: now)
+            }
+        )
+        await runner.runNow(regimen: makeRegimen(enabled: true, intervalHours: 4, rules: ["ask-first"]))?.value
+
+        XCTAssertEqual(runner.lastRun?.skippedReason, "No cleaning rules are enabled.")
+        XCTAssertEqual(scans.value, 0, "the walk is the expensive part, and there is nothing to find")
+        XCTAssertEqual(cleans.value, 0)
+    }
+
+    // MARK: - Empty rules never scan
+
+    func testAnEmptyRulesRunNeverScansTheDisk() async {
+        // `testARegimenWithNoRulesReclaimsNothingAndSaysSo` pins what the
+        // panel says; this pins what the run does not do.  The scan walks the
+        // whole disk, so a regimen with no enabled rules must not pay for it.
+        let now = Date()
+        let scans = LockedBox(0)
+        let cleans = LockedBox(0)
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            scanProvider: { _ in
+                scans.value += 1
+                return CleanScanReport(categories: [], totalBytes: 0, totalSelectedBytes: 0, scannedAt: now)
+            },
+            cleanProvider: { _, _, _ in
+                cleans.value += 1
+                return CleanResult(bytesReclaimed: 0, itemsRemoved: 0, errors: [], cleanedAt: now)
+            }
+        )
+        await runner.runNow(regimen: makeRegimen(enabled: true, rules: []))?.value
+
+        XCTAssertEqual(runner.lastRun?.skippedReason, "No cleaning rules are enabled.")
+        XCTAssertEqual(scans.value, 0)
+        XCTAssertEqual(cleans.value, 0)
+    }
+
+    // MARK: - Run identity and trigger
+
+    func testManualAndScheduledRunsCarryTheirTrigger() async {
+        let manual = makeRunner()
+        await manual.runNow(regimen: makeRegimen(enabled: true, rules: []))?.value
+        XCTAssertEqual(manual.lastRun?.trigger, .manual)
+        XCTAssertNotNil(manual.lastRun?.finishedAt, "finish stamps the run it records")
+
+        let scheduled = makeRunner()
+        await scheduled.runNow(regimen: makeRegimen(enabled: true, rules: []), scheduled: true)?.value
+        XCTAssertEqual(scheduled.lastRun?.trigger, .scheduled)
+        XCTAssertNotEqual(manual.lastRun?.runId, scheduled.lastRun?.runId,
+                          "every run carries its own id for the start/finish logs")
+    }
+
+    func testAnOverdueOverrideRunCarriesTheOverdueTrigger() async {
+        // Same overdue setup as `testAnOverdueRunStartsEvenWhenTheMacIsNeverIdle`:
+        // due seven hours ago, the Mac never idle, so the override starts it.
+        // With no rules enabled it records its skip without touching a file.
+        let key = "hoghunter.cleaner.regimen.lastRunAt"
+        let now = Date()
+        let defaults = makeDefaults()
+        var regimen = makeRegimen(enabled: true, intervalHours: 4)
+        regimen.requireIdleMinutes = 30
+        defaults.set(now.addingTimeInterval(-11 * 3600), forKey: key)
+        let runner = CleanRegimenRunner(
+            now: { now },
+            defaults: defaults,
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            idleSeconds: { 0 }
+        )
+
+        await runner.tick(regimen: regimen)?.value
+
+        XCTAssertEqual(runner.lastRun?.trigger, .overdue)
+    }
+
+    // MARK: - Persisted run trail
+
+    func testFinishedRunsPersistNewestFirstAndCapped() {
+        let history = makeDefaults()
+        let runner = CleanRegimenRunner(
+            now: { Date() },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            historyDefaults: history
+        )
+        for i in 0..<(CleanRegimenRunner.persistedRunsCap + 2) {
+            var run = RegimenRun(startedAt: Date(timeIntervalSince1970: Double(i)))
+            run.itemsRemoved = i
+            runner.finish(run, regimen: makeRegimen())
+        }
+
+        let trail = runner.persistedRecentRuns()
+        XCTAssertEqual(trail.count, CleanRegimenRunner.persistedRunsCap)
+        XCTAssertEqual(trail.first?.itemsRemoved, CleanRegimenRunner.persistedRunsCap + 1,
+                       "newest first, oldest dropped past the cap")
+
+        // A fresh runner over the same suite reads the same trail.
+        let other = CleanRegimenRunner(
+            now: { Date() },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            historyDefaults: history
+        )
+        XCTAssertEqual(other.persistedRecentRuns().count, CleanRegimenRunner.persistedRunsCap)
+    }
+
+    func testPersistedRunsDecodeTolerantly() {
+        // An old-shape record (before runId/trigger/snapshotName existed)
+        // still decodes, an unknown trigger reads as manual, and a record
+        // without a start drops itself instead of the whole trail.
+        let data = Data("""
+        [{"startedAt": 1000, "trigger": "teleport", "itemsRemoved": 3},
+         {"nope": true},
+         {"startedAt": 2000, "itemsRemoved": 1}]
+        """.utf8)
+        let runs = CleanRegimenRunner.decodePersistedRuns(data)
+        XCTAssertEqual(runs.count, 2)
+        XCTAssertEqual(runs[0].trigger, .manual)
+        XCTAssertEqual(runs[0].itemsRemoved, 3)
+        XCTAssertEqual(runs[1].itemsRemoved, 1)
+        XCTAssertEqual(CleanRegimenRunner.decodePersistedRuns(Data("not json".utf8)), [])
+    }
+
+    // MARK: - Unattended history record
+
+    func testFinishAppendsAHistoryRecordOnlyWhenItemsWereRemoved() {
+        let history = CleanupHistoryStore(inMemory: true)
+        let runner = CleanRegimenRunner(
+            now: { Date() },
+            defaults: makeDefaults(),
+            lockProvider: { HousekeeperLock(path: self.lockPath) },
+            cleanupHistory: history
+        )
+
+        runner.finish(RegimenRun(startedAt: Date()), regimen: makeRegimen())
+        XCTAssertTrue(history.allRecords().isEmpty, "a run that removed nothing leaves no row")
+
+        var removed = RegimenRun(startedAt: Date())
+        removed.itemsRemoved = 2
+        removed.bytesReclaimed = 2_048
+        removed.snapshotName = "snap-1"
+        runner.finish(removed, regimen: makeRegimen())
+
+        let records = history.allRecords()
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.first?.source, CleanRegimenRunner.automaticCleanupSource)
+        XCTAssertEqual(records.first?.tier, .standard, "a regimen run is always the Standard clean")
+        XCTAssertEqual(records.first?.snapshotName, "snap-1")
+        XCTAssertEqual(records.first?.itemsRemoved, 2)
+        XCTAssertEqual(records.first?.bytesReclaimed, 2_048)
+    }
 }

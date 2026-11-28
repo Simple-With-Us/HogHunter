@@ -50,6 +50,25 @@ class MaintenanceTests(unittest.TestCase):
         path.write_bytes(b"cache")
         return path
 
+    def test_fleet_extra_pressure_triggers_scheduled_run(self):
+        # Root healthy, fleet-extra full: the run must not skip, because
+        # the volume that fills is fleet-extra, not root.
+        self.pressure.update(free_bytes=60 * 1024**3, used_percent=40)
+        extra = {"mount": "/mnt/fleet-extra", "free_bytes": 10 * 1024**3,
+                 "total_bytes": 100 * 1024**3, "used_percent": 90}
+        self.tool.measure_fleet_extra = lambda: dict(extra)
+        result = self.tool.execute()
+        self.assertTrue(result["pressure"])
+        self.assertTrue(result["fleet_extra_pressure"])
+        self.assertEqual(result["fleet_extra"]["used_percent"], 90)
+        self.assertIn("fleet_extra_observed_free_delta_bytes", result)
+
+    def test_no_fleet_extra_mount_keeps_root_only_contract(self):
+        self.tool.measure_fleet_extra = lambda: None
+        result = self.tool.execute()
+        self.assertNotIn("fleet_extra", result)
+        self.assertTrue(result["pressure"])
+
     def test_healthy_does_not_inventory_run_or_lock(self):
         self.pressure.update(free_bytes=60 * 1024**3, used_percent=40)
         self.tool.files = lambda _: self.fail("healthy path scanned filesystem")
@@ -337,7 +356,7 @@ class MaintenanceTests(unittest.TestCase):
                 template = argv[argv.index('--format') + 1]
                 self.assertIn('"created":', template)
                 self.assertNotIn('Config.Env', template)
-                return 0, json.dumps(dict(created='2020-01-01T00:00:00Z', tags=[], labels={'description': 'valid|label'}))
+                return 0, json.dumps(dict(created='2020-01-01T00:00:00Z', size=1024, tags=[], labels={'description': 'valid|label'}))
             self.assertIn('rm', argv)
             self.assertTrue((self.tool.lock / 'dispatch.json').exists())
             return 0, ''
@@ -359,12 +378,78 @@ class MaintenanceTests(unittest.TestCase):
                         return 0, identity
                     self.assertIn('inspect', argv, 'changed image was removed')
                     inspects.append(argv[-1])
-                    return 0, json.dumps(dict(created='2020-01-01T00:00:00Z',
+                    return 0, json.dumps(dict(created='2020-01-01T00:00:00Z', size=1024,
                         tags=[] if len(inspects) == 1 else tags, labels={} if len(inspects) == 1 else labels))
                 self.tool.runner = runner
                 result = self.tool.execute('run', ['docker-images'], True)
                 self.assertEqual(result['status'], 'skipped')
                 self.assertEqual(inspects, [identity, identity])
+    def test_scan_reports_reclaimable_bytes_and_thresholds(self):
+        first = self.cache("old.deb")
+        second = self.cache("older.deb")
+        result = self.tool.execute('scan', ['package-cache'], manual=True)
+        self.assertEqual(result['status'], 'planned')
+        item = result['strategies'][0]
+        self.assertEqual(item['candidate_count'], 2)
+        self.assertEqual(item['reclaimable_bytes'], first.stat().st_size + second.stat().st_size)
+        self.assertEqual(result['reclaimable_bytes'], item['reclaimable_bytes'])
+        self.assertTrue(result['reclaimable_complete'])
+        self.assertEqual(result['thresholds'],
+                         {'used_percent_at_or_above': 80.0, 'free_bytes_at_or_below': 25 * 1024**3})
+        self.assertIn('started_at', result)
+        self.assertIn('finished_at', result)
+
+    def test_image_scan_sums_the_inspect_sizes_of_eligible_images(self):
+        identities = ['sha256:' + letter * 64 for letter in ('a', 'b')]
+        sizes = dict(zip(identities, (2048, 4096)))
+        def runner(argv):
+            if 'ls' in argv:
+                return 0, '\n'.join(identities)
+            template = argv[argv.index('--format') + 1]
+            self.assertIn('"size":', template)
+            return 0, json.dumps(dict(created='2020-01-01T00:00:00Z', size=sizes[argv[-1]], tags=[], labels={}))
+        self.tool.runner = runner
+        result = self.tool.execute('scan', ['docker-images'], manual=True)
+        item = result['strategies'][0]
+        self.assertEqual(item['candidate_count'], 2)
+        self.assertEqual(item['reclaimable_bytes'], 6144)
+        self.assertTrue(result['reclaimable_complete'])
+
+    def test_build_cache_bytes_report_only_when_every_size_parses(self):
+        ids = ['abcdef0123', 'fedcba0123']
+        records = [dict(ID=i, Reclaimable=True, Mutable=False, Shared=False, Type='regular',
+                        LastUsedAt='2020-01-01T00:00:00Z', Size=s)
+                   for i, s in zip(ids, ('1.5MB', '2GB'))]
+        def runner(argv):
+            if 'du' in argv:
+                return 0, '\n'.join(json.dumps(r) for r in records)
+            return 0, 'Driver: docker\nEndpoint: unix:///var/run/docker.sock'
+        self.tool.runner = runner
+        result = self.tool.execute('scan', ['docker-build-cache'], manual=True)
+        item = result['strategies'][0]
+        self.assertEqual(item['candidate_count'], 2)
+        self.assertEqual(item['reclaimable_bytes'], 1500000 + 2000000000)
+        records[1]['Size'] = 'two gigabytes'
+        result = self.tool.execute('scan', ['docker-build-cache'], manual=True)
+        item = result['strategies'][0]
+        self.assertNotIn('reclaimable_bytes', item)
+        self.assertFalse(result['reclaimable_complete'])
+        self.assertEqual(result['reclaimable_bytes'], 0)
+
+    def test_a_clean_strategy_still_states_zero_bytes(self):
+        result = self.tool.execute('scan', ['package-cache'], manual=True)
+        item = result['strategies'][0]
+        self.assertEqual(item['candidate_count'], 0)
+        self.assertEqual(item['reclaimable_bytes'], 0, "zero is a known size, not an unknown one")
+        self.assertTrue(result['reclaimable_complete'])
+
+    def test_size_text_bytes_is_strict(self):
+        self.assertEqual(m.size_text_bytes('1.5MB'), 1500000)
+        self.assertEqual(m.size_text_bytes('12B'), 12)
+        self.assertEqual(m.size_text_bytes('1.234GB'), 1234000000)
+        for bad in ('two gigabytes', '1.5 GB', '-1MB', None, 12, '', '1.5mB'):
+            self.assertIsNone(m.size_text_bytes(bad), bad)
+
     def test_known_dead_lock_recovery_and_owner_mismatch(self):
         self.assertTrue(self.tool.acquire_lock())
         with patch.object(m.os, "kill", side_effect=ProcessLookupError):

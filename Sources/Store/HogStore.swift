@@ -155,10 +155,11 @@ final class HogStore: ObservableObject {
             writeThroughInfisical(key: InfisicalKey.alertWebhookURL, value: alertWebhookURL)
         }
     }
-    /// System, not light: the fleet-wide owner ruling (FLEET-UI-COPY.md, 2026-09-19)
-    /// is that first paint follows the OS.  A stored Light or Dark still wins --
-    /// only the no-preference fallback changes.
-    @Published var appearance: AppearanceChoice = .system { didSet { persist() } }
+    /// Light when no preference is stored: the current owner ruling
+    /// (AGENTS.md Copy, superseding the 2026-09-19 System default) is that
+    /// first paint is Light.  A stored Light, Dark or System still wins --
+    /// only the no-preference fallback is Light.
+    @Published var appearance: AppearanceChoice = .light { didSet { persist() } }
     /// Off until the owner turns it on.  Shares activity telemetry with the paired iPhone.
     @Published var shareWithIPhone = false {
         didSet {
@@ -318,8 +319,17 @@ final class HogStore: ObservableObject {
     /// The one Maintain store.  The Mac's Storage tab and the iPhone
     /// route both use it, so a run started from either is the only run.
     let maintain: MaintainStore
-    /// What the phone's server control routes run.  Holds its own `ServerControl`
-    /// and `ServerMaintenanceControl`, the same types the Mac's UI uses.
+    /// The one control for server process and workload actions, shared by the
+    /// Mac's own menus and the phone's server routes, so a Mac action and a
+    /// phone action cannot run at once.  Either side's `isWorking` refuses
+    /// the other's next action until the run lands.
+    let serverControl: ServerControl
+    /// The one control for server maintenance, shared the same way.  The
+    /// process and workload menus stay disabled while it works, and the
+    /// maintenance card stays disabled while `serverControl` works.
+    let serverMaintenance: ServerMaintenanceControl
+    /// What the phone's server control routes run, on the two shared
+    /// controls above — the same instances the Mac's UI uses.
     let serverActions: CompanionServerActions
     private var maintainObservers = Set<AnyCancellable>()
     private var serverStatusMemo = CompanionServerStatusMemo()
@@ -488,10 +498,14 @@ final class HogStore: ObservableObject {
         self.bandwidth = BandwidthStore(history: history)
         let maintainStore = maintain ?? MaintainStore()
         self.maintain = maintainStore
+        let sharedControl = serverControl ?? ServerControl()
+        self.serverControl = sharedControl
+        let sharedMaintenance = serverMaintenance ?? ServerMaintenanceControl()
+        self.serverMaintenance = sharedMaintenance
         self.serverActions = CompanionServerActions(
             vps: maintainStore.vpsStore,
-            control: serverControl ?? ServerControl(),
-            maintenance: serverMaintenance ?? ServerMaintenanceControl(),
+            control: sharedControl,
+            maintenance: sharedMaintenance,
             isMaintainRunning: { [weak maintainStore] in maintainStore?.isRunningNow ?? false },
             audit: serverAudit ?? CompanionServerActions.defaultAudit
         )
@@ -2188,7 +2202,18 @@ final class HogStore: ObservableObject {
     /// Each member is checked against the live process table first, so a pid
     /// that now belongs to something else is left alone.
     nonisolated func performRemoteTame(target: CompanionTarget, action: String) -> (status: Int, body: Data) {
-        let isTame = action.lowercased() == "tame"
+        // Whitelist: only "tame" and "untame" may act.  Any other spelling
+        // must not silently fall through to untame (restoring priority).
+        let normalized = action.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalized == "tame" || normalized == "untame" else {
+            let response = CompanionTameResponse(
+                status: "rejected", pid: target.members.first?.pid ?? 0, name: target.name,
+                isTamed: false, message: nil,
+                error: "The tame action must be tame or untame.", acted: 0, skipped: target.members.count
+            )
+            return (400, (try? JSONEncoder().encode(response)) ?? Data())
+        }
+        let isTame = normalized == "tame"
         let outcome = isTame
             ? ProcessControl.tame(members: target.members, fallbackName: target.name)
             : ProcessControl.untame(members: target.members, fallbackName: target.name)
@@ -2834,7 +2859,8 @@ final class HogStore: ObservableObject {
             rows: rows,
             storage: CompanionSnapshotBuilder.currentStorageSummary(
                 drives: MountedDriveStore.shared.rows,
-                directories: directoryUsage.rows
+                directories: directoryUsage.rows,
+                diskSpace: diskSpace
             ),
             network: networkScan.rows,
             networkNote: networkScan.note,

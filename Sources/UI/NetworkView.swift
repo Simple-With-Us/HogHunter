@@ -227,6 +227,10 @@ struct NetworkView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                Text(Self.connectionLegend)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
                         ForEach(sortedUsages) { usage in
@@ -239,6 +243,10 @@ struct NetworkView: View {
         }
     }
 
+    /// What the two numbers on each row mean.  One line, shared by the visible
+    /// legend above the list and the footer's key, so the two cannot drift.
+    static let connectionLegend = "Connections column is established/open.\u{00A0} Hosts is distinct remote machines."
+
     /// What the two numbers on each row mean.  A bare "3/9" and "4 hosts" is
     /// the same kind of noise as an unlabelled column of pids: correct, and
     /// useless without the key.  This is the key, and it is a hover, so it
@@ -248,7 +256,7 @@ struct NetworkView: View {
             Image(systemName: "info.circle")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            Text("Connections column is established/open.\u{00A0} Hosts is distinct remote machines.")
+            Text(Self.connectionLegend)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }

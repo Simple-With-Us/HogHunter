@@ -1,3 +1,5 @@
+<p><img src="ios/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png" alt="HogHunter logo" width="96" height="96"></p>
+
 # Hog Hunter
 
 A Mac menu bar utility that names the processes and apps eating CPU and memory right now, over the past hour, and over the past 24 hours.  Quit a hog from the list after a confirm.  It also shows what is using your disk and your network, and it can clean reclaimable disk clutter.
@@ -41,7 +43,7 @@ Build the phone app for the simulator with scheme `HogHunterIOS`.  TestFlight bu
 ## Build and run
 
 ```bash
-cd ~/apps/HogHunter
+cd ~/Code/HogHunter
 xcodegen generate
 xcodebuild -scheme HogHunter -configuration Release -derivedDataPath build
 ```

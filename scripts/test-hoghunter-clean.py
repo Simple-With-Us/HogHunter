@@ -1308,6 +1308,22 @@ def test_app_staging_offers_idle_shipit_in_the_safe_tier(hh):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def test_newest_file_age_min_respects_wall_clock_bound(hh):
+    """A huge tree must not wedge the tick: with max_seconds=0 the walk
+    stops at once and reports only what it saw (nothing = safely idle)."""
+    home = Path(tempfile.mkdtemp(prefix="hhclean-home-"))
+    try:
+        tree = home / "tree"
+        tree.mkdir()
+        (tree / "fresh.o").write_text("x\n", encoding="utf-8")
+        assert hh.newest_file_age_min(str(tree), max_seconds=60) < 5
+        # A timed-out walk fails closed as busy, never as safely idle.
+        assert hh.newest_file_age_min(str(tree), max_seconds=0) == 0.0
+        assert hh.newest_file_age_min(str(home / "missing")) == 1e9
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def test_touched_since_catches_a_recent_file_past_the_walk_cap(hh):
     """newest_file_age_min stops at 4000 entries, so a recent file past the cap
     reads as idle.  The find probe has no cap: it answers on the first recent
@@ -3086,7 +3102,8 @@ def test_xcode_scratch_refuses_links_and_other_owners(hh):
 
 
 def test_xcode_scratch_per_tree_findings(hh):
-    with fake_home(hh) as home, gates_open(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "read_disk_free", return_value=30.0):
         tree = xcode_tree(home, days=0.5)
         assert "24 hours" in str(hh._xcode_scratch_refusal(tree))
         shutil.rmtree(tree)
@@ -3463,6 +3480,130 @@ def test_every_rule_is_in_the_policy_and_the_engine_only_rules_are_not_schedulab
         assert rules[name]["tier"] == tier, name
         assert rules[name]["op"] == op, name
         assert f'"{name}"' not in block, f"the regimen cannot run {name}, so it must not offer it"
+
+
+def test_simulator_runtimes_keeps_the_newest_runtime_of_each_platform(hh):
+    """The newest runtime of a platform (a fresh release or beta) is never
+    offered; an older runtime of the same platform still is.  The iOS-27
+    gate is disabled here so the keep guard, not that gate, is what protects
+    the 27.2 bundle; the Xcode SDK read is pinned to 27."""
+    with fake_home(hh) as home, gates_open(hh), mock.patch.object(hh, "open_handles", return_value=0), \
+            mock.patch.object(hh, "_xcode_iphoneos_sdk_version", return_value=(27, 2), create=True):
+        runtimes = home / "Library/Developer/CoreSimulator/Profiles/Runtimes"
+        old_ios = old_tree(runtimes / "iOS_26_5.simruntime")
+        new_ios = old_tree(runtimes / "iOS_27_2.simruntime")
+        hh.CLEAN_IOS27 = True
+        try:
+            paths = rule_paths(hh.rule_simulator_runtimes())
+        finally:
+            hh.CLEAN_IOS27 = False
+        assert str(old_ios) in paths, paths
+        assert str(new_ios) not in paths, paths
+
+
+def test_simulator_runtimes_offers_nothing_when_one_runtime_is_installed(hh):
+    """A platform with exactly one runtime: with nothing newer beside it the
+    rule must offer nothing, even with every process gate open and the bundle
+    long idle."""
+    with fake_home(hh) as home, gates_open(hh), mock.patch.object(hh, "open_handles", return_value=0), \
+            mock.patch.object(hh, "_xcode_iphoneos_sdk_version", return_value=(26, 5), create=True):
+        old_tree(home / "Library/Developer/CoreSimulator/Profiles/Runtimes/iOS_26_5.simruntime")
+        assert hh.rule_simulator_runtimes() == []
+
+
+def test_simulator_runtimes_keeps_unparseable_and_per_platform_newest(hh):
+    """The guard is per platform: an old watchOS bundle is still offered next
+    to a newer one, and a bundle whose name does not parse is kept rather
+    than risk deleting a runtime Xcode needs."""
+    with fake_home(hh) as home, gates_open(hh), mock.patch.object(hh, "open_handles", return_value=0), \
+            mock.patch.object(hh, "_xcode_iphoneos_sdk_version", return_value=(27, 2), create=True):
+        rt = home / "Library/Developer/CoreSimulator/Profiles/Runtimes"
+        old_watch = old_tree(rt / "watchOS_11_0.simruntime")
+        new_watch = old_tree(rt / "watchOS_11_4.simruntime")
+        odd = old_tree(rt / "OddBundle.simruntime")
+        paths = rule_paths(hh.rule_simulator_runtimes())
+        assert str(old_watch) in paths, paths
+        assert str(new_watch) not in paths, paths
+        assert str(odd) not in paths, paths
+
+
+def test_simulator_runtimes_keeps_the_sdk_runtime_beside_a_newer_beta(hh):
+    """A newer beta makes the release runtime not-the-newest, and the release
+    is still the one the selected Xcode is built to use: the iOS runtime
+    matching the Xcode SDK's major version is never offered."""
+    with fake_home(hh) as home, gates_open(hh), mock.patch.object(hh, "open_handles", return_value=0), \
+            mock.patch.object(hh, "_xcode_iphoneos_sdk_version", return_value=(27, 2), create=True):
+        rt = home / "Library/Developer/CoreSimulator/Profiles/Runtimes"
+        release = old_tree(rt / "iOS_27_2.simruntime")
+        beta = old_tree(rt / "iOS_28_0.simruntime")
+        hh.CLEAN_IOS27 = True
+        try:
+            assert hh.rule_simulator_runtimes() == []
+        finally:
+            hh.CLEAN_IOS27 = False
+        assert release.is_dir() and beta.is_dir()
+
+
+def test_simulator_runtimes_fail_closed_when_the_sdk_version_is_unreadable(hh):
+    """When the selected Xcode's SDK version cannot be read, the identity of
+    the runtime Xcode needs is unknown: no iOS runtime is offered at all.
+    Other platforms still follow the keep-newest rule."""
+    with fake_home(hh) as home, gates_open(hh), mock.patch.object(hh, "open_handles", return_value=0), \
+            mock.patch.object(hh, "_xcode_iphoneos_sdk_version", return_value=None, create=True):
+        rt = home / "Library/Developer/CoreSimulator/Profiles/Runtimes"
+        old_ios = old_tree(rt / "iOS_26_5.simruntime")
+        old_watch = old_tree(rt / "watchOS_11_0.simruntime")
+        old_tree(rt / "watchOS_11_4.simruntime")
+        paths = rule_paths(hh.rule_simulator_runtimes())
+        assert str(old_ios) not in paths, paths
+        assert str(old_watch) in paths, paths
+
+
+def test_xcode_sdk_version_parsing(hh):
+    """The SDK reader takes the leading version tuple and nothing else."""
+    import subprocess as sp
+    reader = hh._xcode_iphoneos_sdk_version
+    for result, want in (
+        (sp.CompletedProcess([], 0, "27.2\n", ""), (27, 2)),
+        (sp.CompletedProcess([], 1, "", "err"), None),
+    ):
+        reader.cache_clear()
+        with mock.patch.object(hh.subprocess, "run", return_value=result):
+            assert reader() == want
+    reader.cache_clear()
+    with mock.patch.object(hh.subprocess, "run", side_effect=OSError("no xcrun")):
+        assert reader() is None
+    reader.cache_clear()
+
+
+def test_xcode_sdk_version_probe_runs_once_per_process(hh):
+    """xcrun can take seconds on a cold start and the selected Xcode does not
+    change during a run: repeat readers share the first probe's answer."""
+    import subprocess as sp
+    reader = hh._xcode_iphoneos_sdk_version
+    reader.cache_clear()
+    try:
+        with mock.patch.object(hh.subprocess, "run",
+                               return_value=sp.CompletedProcess([], 0, "27.2\n", "")) as run:
+            assert reader() == (27, 2)
+            assert reader() == (27, 2)
+        assert run.call_count == 1
+    finally:
+        reader.cache_clear()
+
+
+def test_runtime_name_parser_is_anchored(hh):
+    """Only a name that STARTS with the platform parses.  A directory that
+    merely contains a platform word is not read as a runtime, and whatever
+    does not parse is kept, never offered."""
+    parse = hh._runtime_platform_version
+    assert parse("iOS 27.2.simruntime") == ("ios", (27, 2))
+    assert parse("iOS_27_2.simruntime") == ("ios", (27, 2))
+    assert parse("watchOS 11.4.simruntime") == ("watchos", (11, 4))
+    assert parse("tvOS-26-2.simruntime") == ("tvos", (26, 2))
+    assert parse("com.apple.CoreSimulator.SimRuntime.iOS-27-2") is None
+    assert parse("Old iOS_26_5 backup.simruntime") is None
+    assert parse("iOS27.simruntime") is None
 
 
 def test_the_policy_states_the_tier_the_simulator_rule_really_runs_at(hh):
@@ -4379,6 +4520,121 @@ def clean_main(hh, argv, free, apply_free=None):
     return json.loads(out.getvalue())
 
 
+def _test_cache_fixture(home, base_name="zc-lane-92524eaa8430"):
+    """The layout a plain workspace build really leaves: xcodegen-post points
+    the checkout at <cache>/<checkout>-<hash>, and Xcode appends its own
+    HogHunter-<hash> below that, with ever-refreshing module caches beside
+    it."""
+    cache_root = home / "Library" / "Caches" / "HogHunterDerivedData"
+    base = cache_root / base_name
+    tree = xcode_tree(home, "HogHunter-gypzzncfdrkbjcaurhenaphjrkpw", root=base)
+    for noise in ("SDKExplicitPrecompiledModules", "SDKStatCaches.noindex"):
+        blob(base / noise / "pad", 30)
+    settle(base, 30)
+    return cache_root, base, tree
+
+
+def test_test_cache_sweep_covers_the_app_deriveddata_cache(hh):
+    """The app's own test-build cache (xcodegen-post's default DerivedData)
+    joins the sweep: same shape gates, same pressure line.  17 GB of
+    repeated full-suite runs sat idle there while the disk was at 23 GB."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root, base, tree = _test_cache_fixture(home)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 1, report
+        assert not base.exists(), "the whole checkout base goes"
+        assert cache_root.is_dir(), "the cache folder stays"
+
+
+def test_test_cache_scan_refuses_content_under_the_cache_root(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root, base, tree = _test_cache_fixture(home)
+        (tree / "Package.swift").write_text("x", encoding="utf-8")
+        settle(base, 30)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert tree.exists(), "content that looks like source keeps the root"
+        assert base.exists(), "nothing under the cache root is deleted"
+        assert report["applied_count"] == 0, report
+
+
+def test_test_cache_stray_at_the_base_spares_the_base(hh):
+    """A file the checkout's owner dropped beside the build caches is not
+    build noise: the DerivedData root still goes, the base stays."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root, base, tree = _test_cache_fixture(home)
+        (base / "notes.txt").write_text("mine", encoding="utf-8")
+        settle(base, 30)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 1, report
+        assert not tree.exists(), "the identified DerivedData root goes"
+        assert base.exists(), "the stray keeps the base"
+
+
+def test_test_cache_flat_base_joins_the_sweep(hh):
+    """An explicit -derivedDataPath run writes the DerivedData root at the
+    base itself; it is the same positive identification."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root = home / "Library" / "Caches" / "HogHunterDerivedData"
+        flat = xcode_tree(home, "hh-dd-flat", root=cache_root)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 1, report
+        assert not flat.exists(), "the flat base goes"
+
+
+def test_test_cache_symlinked_base_is_skipped(hh):
+    """A link under the cache is never scoped through its target: the flat
+    read refuses links by lstat and the nested read must not follow one."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root = home / "Library" / "Caches" / "HogHunterDerivedData"
+        target = home / "elsewhere"
+        tree = xcode_tree(home, "HogHunter-gypzzncfdrkbjcaurhenaphjrkpw", root=target)
+        blob(target / "SDKStatCaches.noindex" / "pad", 30)
+        settle(target, 30)
+        base = cache_root / "linked-checkout"
+        base.parent.mkdir(parents=True, exist_ok=True)
+        base.symlink_to(target)
+        assert hh._test_cache_scope(base) is None
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 0, report
+        assert base.is_symlink() and tree.exists(), "the link and its target stay"
+
+
+def test_test_cache_base_gate_shrinks_to_the_root(hh):
+    """A whitelisted sibling can hold something the root's gates never saw --
+    here a nested repository inside Build/ -- and the base-level gate must
+    stop the whole-base delete: the root still goes, the base keeps the
+    sibling."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root, base, tree = _test_cache_fixture(home)
+        blob(base / "Build" / "keep-repo" / "file", 30)
+        (base / "Build" / "keep-repo" / ".git").mkdir()
+        settle(base, 30)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 1, report
+        assert not tree.exists(), "the identified root still goes"
+        assert base.exists(), "the sibling keeps the base"
+
+
+def test_test_cache_base_marker_spares_the_base(hh):
+    """A keep marker inside a whitelisted sibling is invisible to the root's
+    gates; the base-level gate walks the base and shrinks the delete."""
+    with fake_home(hh) as home, gates_open(hh):
+        cache_root, base, tree = _test_cache_fixture(home)
+        (base / "SDKStatCaches.noindex" / ".janitor-keep").write_text("", encoding="utf-8")
+        settle(base, 30)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
+        assert report["applied_count"] == 1, report
+        assert not tree.exists(), "the identified root still goes"
+        assert base.exists(), "the marker keeps the base"
+
+
+def test_the_roots_list_names_the_test_cache(hh):
+    with fake_home(hh) as home:
+        roots = [(str(r), mode) for r, mode in hh._xcode_scratch_roots()]
+    want = (str(home / "Library" / "Caches" / "HogHunterDerivedData"), "test-cache")
+    assert want in roots, f"the test cache is one of the sweep roots; got {roots}"
+
+
 def test_hh219_a_derived_data_root_is_deleted(hh):
     with fake_home(hh) as home, gates_open(hh):
         tmp_tree = xcode_tree(home, "hh-push-dd")
@@ -4420,7 +4676,8 @@ def test_hh219_a_symlink_is_never_followed_or_deleted(hh):
 
 
 def test_hh219_a_recently_touched_root_is_not_deleted(hh):
-    with fake_home(hh) as home, gates_open(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "read_disk_free", return_value=30.0):
         tree = xcode_tree(home)
         # Xcode writes each build's log into Logs/Build, which moves that
         # folder, two levels down.
@@ -4438,7 +4695,7 @@ def test_hh219_a_recently_touched_root_is_not_deleted(hh):
         with mock.patch.object(hh, "changed_age_min", return_value=60.0):
             assert "24 hours" in str(hh._xcode_scratch_refusal(tree)), "moved in an hour ago"
         age(tree / "Logs" / "Build", 0.5)
-        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 10.0)
+        report = clean_main(hh, ["--clean", "--json", "--categories=xcode-scratch"], 30.0)
         assert report["applied_count"] == 0 and tree.is_dir()
         row = report["candidates"][0]
         assert row["op"] == "report" and "24 hours" in row["reason"], row
@@ -4650,7 +4907,8 @@ def test_pr274_precious_files_deep_in_the_build_output_keep_the_root(hh):
 
 
 def test_pr274_a_fresh_file_anywhere_in_the_tree_keeps_the_root(hh):
-    with fake_home(hh) as home, gates_open(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "read_disk_free", return_value=30.0):
         tree = xcode_tree(home)
         deep = tree / "Build" / "Intermediates.noindex" / "App.build" / "Release" / "obj.o"
         deep.parent.mkdir(parents=True)
@@ -4751,7 +5009,8 @@ def test_pr274_a_precious_file_anywhere_in_the_root_keeps_it(hh):
 
 
 def test_pr274_the_idle_gate_sees_past_4000_files_and_fails_closed(hh):
-    with fake_home(hh) as home, gates_open(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "read_disk_free", return_value=30.0):
         tree = xcode_tree(home)
         many = tree / "Build" / "Intermediates.noindex" / "App.build" / "Objects"
         many.mkdir(parents=True)
@@ -5304,6 +5563,398 @@ def test_a_skip_for_a_rule_the_pass_never_walked_does_not_block_the_reset(hh):
         hh.RULES = original_rules
         hh.HOME = original_home
         shutil.rmtree(home, ignore_errors=True)
+
+
+# --- integration-tree build caches (HH-229) -------------------------------
+
+def integration_cache(home, days=30, name="HogHunter"):
+    repo = home / "Code" / name
+    (repo / ".git").mkdir(parents=True, exist_ok=True)
+    sources = repo / "Sources"
+    sources.mkdir(parents=True, exist_ok=True)
+    (sources / "App.swift").write_text("x", encoding="utf-8")
+    (repo / "Package.swift").write_text("// swift-tools-version:5.9", encoding="utf-8")
+    build = xcode_tree(home, name="build", days=days, root=repo)
+    return repo, build
+
+
+def test_integration_build_cache_is_swept_and_sources_stay(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        sources = repo / "Sources"
+        sources.mkdir(parents=True, exist_ok=True)
+        (sources / "App.swift").write_text("x", encoding="utf-8")
+
+        found = hh.rule_xcode_artifacts()
+        assert str(build) in rule_paths(found), "the positively identified cache is the candidate"
+
+        cand = next(c for c in found if c.path == str(build))
+        hh.apply_candidate(cand)
+
+        assert not build.exists(), "the cache is reclaimed"
+        assert (repo / ".git").is_dir(), "the checkout stays"
+        assert (sources / "App.swift").exists(), "sources stay"
+
+
+def test_integration_build_cache_survives_active_merges(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home, days=30)
+        age(repo / ".git", 0)
+        age(repo / "Sources", 0)
+
+        found = hh.rule_xcode_artifacts()
+        assert str(build) in rule_paths(found), "an active checkout does not hide an idle cache"
+
+
+def test_integration_build_cache_needs_the_xcode_shape(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo = home / "Code" / "HogHunter"
+        repo.mkdir(parents=True, exist_ok=True)
+        build = repo / "build"
+        build.mkdir()
+        (build / "stuff").write_text("x", encoding="utf-8")
+        settle(build, 30)
+        assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a build/ that is not positively Xcode's stays"
+
+
+def test_fresh_integration_cache_waits_for_idleness(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "read_disk_free", return_value=30.0):
+        repo, build = integration_cache(home, days=0.5)
+        assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a cache written in the last 24 hours is not spent output"
+
+
+def test_integration_cache_keeps_markers(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        marker = build / "Build" / "Products" / hh.KEEP_SENTINEL
+        marker.write_text("", encoding="utf-8")
+        settle(build, 30)
+        assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a keep marker anywhere in the cache keeps the whole cache"
+
+
+def test_the_probes_answer_without_bsd_quit(hh):
+    """GNU find (Linux CI) refuses -quit outright, so the marker probe and the
+    touched probe must answer identically without it -- this is the exact
+    failure the first CI run caught on this branch."""
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        deep = build / "Build" / "Intermediates.noindex" / "deep"
+        deep.mkdir(parents=True, exist_ok=True)
+        (deep / hh.KEEP_SENTINEL).write_text("", encoding="utf-8")
+        _, quiet = integration_cache(home, name="OtherApp")
+        with mock.patch.object(hh, "FIND_QUIT", ()):
+            verdict = hh.holds_keep_sentinel(str(build), 30.0)
+            assert verdict.found and verdict.known, "the deep marker is found without -quit"
+            assert not hh.touched_since(str(quiet), 1.0), "a quiet tree reads as idle without -quit"
+            (quiet / "fresh.o").write_text("x", encoding="utf-8")
+            assert hh.touched_since(str(quiet), 1.0), "a fresh file reads as touched without -quit"
+
+
+def test_integration_cache_respects_the_pressure_line(hh):
+    """The pool rides the xcode-scratch category, so the 60 GB line gates the
+    scan, the clean, and the df re-read at the delete exactly as the review
+    round demanded."""
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        for free in (60.01, 80.0, 200.0):
+            report = clean_main(hh, ["--clean", "--json", "--band=full", "--categories=xcode-artifacts"], free)
+            assert report["applied_count"] == 0 and build.exists(), (free, report["applied_count"])
+        scan = clean_main(hh, ["--scan", "--json", "--categories=xcode-artifacts"], 80.0)
+        assert [c["op"] for c in scan["candidates"]] == ["delete"], "a scan still lists what it would take"
+        assert scan["actionable_count"] == 0
+        [cand] = [c for c in hh.rule_xcode_artifacts() if c.path == str(build)]
+        with mock.patch.object(hh, "read_disk_free", return_value=61.0):
+            hh.apply_candidate(cand)
+        assert build.exists(), "the df re-read at the delete still applies the line"
+        with mock.patch.object(hh, "read_disk_free", return_value=10.0):
+            hh.apply_candidate(cand)
+        assert not build.exists(), "at or under the line it deletes"
+
+
+def test_integration_cache_recheck_reruns_the_gates(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        [cand] = [c for c in hh.rule_xcode_artifacts() if c.path == str(build)]
+        (build / hh.KEEP_SENTINEL).write_text("", encoding="utf-8")
+        hh.apply_candidate(cand)
+        assert build.exists(), "a marker placed after the scan keeps the cache"
+
+
+def test_integration_cache_refuses_precious_and_nested_state(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        products = build / "Build" / "Products"
+        (products / "clone").mkdir(parents=True, exist_ok=True)
+        (products / "clone" / ".git").mkdir(parents=True, exist_ok=True)
+        assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a repository nested in the products keeps the cache"
+        shutil.rmtree(products / "clone")
+        (products / "release-key.p12").write_bytes(b"x")
+        settle(build, 30)
+        assert str(build) not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a signing key anywhere in the cache keeps it"
+        (products / "release-key.p12").unlink()
+        settle(build, 30)
+        assert str(build) in rule_paths(hh.rule_xcode_artifacts()), \
+            "with the key gone the cache is a candidate again"
+
+
+def test_integration_pool_skips_a_symlinked_checkout(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        repo, build = integration_cache(home)
+        target = home / "elsewhere"
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(repo), str(target / "Repo"))
+        link = home / "Code" / "Linked"
+        link.symlink_to(target / "Repo", target_is_directory=True)
+        assert str(link / "build") not in rule_paths(hh.rule_xcode_artifacts()), \
+            "a checkout reached through a symlink is never named"
+
+
+def test_tmp_large_trees_reports_big_trees_of_any_name(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        tree = scratch / "mm-dd-p3s3"
+        blob(tree / "payload.bin", 30)
+        blob(scratch / "small" / "tiny.bin", 0, size=1024)
+        settle(tree, 30)
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024):
+            found = {c.path: c for c in hh.rule_tmp_large_trees()}
+        assert str(tree) in found, "a big seat scratch tree is surfaced"
+        row = found[str(tree)]
+        assert row.op == "report" and row.tier == "ask-first", "report only, ask-first"
+        assert str(scratch / "small") not in found, "a small tree is not surfaced"
+
+
+def test_tmp_large_trees_surfaces_keep_marker_and_skips_symlinks(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        marked = scratch / "keepme"
+        blob(marked / "data.bin", 30)
+        (marked / hh.KEEP_SENTINEL).write_text("", encoding="utf-8")
+        settle(marked, 30)
+        real = scratch / "realtree"
+        blob(real / "data.bin", 30)
+        settle(real, 30)
+        (scratch / "link").symlink_to(real, target_is_directory=True)
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024):
+            found = {c.path: c for c in hh.rule_tmp_large_trees()}
+        assert str(marked) in found, "a marked tree is still surfaced"
+        assert "marker" in found[str(marked)].reason, "the row says it carries a keep marker"
+        assert not any(c.path.endswith("/link") for c in found.values()), "a symlink is never named"
+
+
+def test_tmp_large_trees_leaves_candidate_names_to_tmp_build_trees(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        tree = scratch / "feature-rebase"
+        blob(tree / "payload.bin", 30)
+        settle(tree, 30)
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024):
+            found = {c.path for c in hh.rule_tmp_large_trees()}
+        assert str(tree) not in found, "tmp-build-trees owns candidate and rebase names"
+
+
+def test_tmp_large_trees_phrases_a_fresh_tree_honestly(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        tree = scratch / "hot-scratch"
+        blob(tree / "payload.bin", 30)
+        (tree / "fresh.bin").write_text("x", encoding="utf-8")
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024):
+            found = {c.path: c for c in hh.rule_tmp_large_trees()}
+        row = found[str(tree)]
+        assert "newest write 0 min ago" in row.reason, \
+            "a fresh file the capped walk sees is phrased as measured age"
+
+
+def test_tmp_large_trees_phrases_an_ambiguous_probe_honestly(hh):
+    """A capped walk that reads old plus an unbounded find that says touched
+    is ambiguous -- a fresh file past the cap and a failed probe look the
+    same -- so the row says the tree could not be proven quiet instead of
+    asserting a write age nobody measured."""
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        tree = scratch / "quiet-looking"
+        blob(tree / "payload.bin", 30)
+        (tree / "fresh.bin").write_text("x", encoding="utf-8")
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024), \
+                mock.patch.object(hh, "newest_file_age_min", return_value=3000.0):
+            found = {c.path: c for c in hh.rule_tmp_large_trees()}
+        assert "could not prove the tree quiet" in found[str(tree)].reason, \
+            "an ambiguous probe is never phrased as a measured write age"
+
+
+def test_tmp_large_trees_reports_an_unproven_probe_honestly(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        tree = scratch / "unprovable"
+        blob(tree / "payload.bin", 30)
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024), \
+                mock.patch.object(hh, "newest_file_age_min", return_value=3000.0), \
+                mock.patch.object(hh, "touched_since", return_value=True):
+            found = {c.path: c for c in hh.rule_tmp_large_trees()}
+        assert "could not prove the tree quiet" in found[str(tree)].reason, \
+            "a failed probe is never phrased as a measured write age"
+
+
+def test_tmp_large_trees_states_measured_age_inside_the_probe_window(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        tree = scratch / "hours-old"
+        blob(tree / "payload.bin", 30)
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024), \
+                mock.patch.object(hh, "newest_file_age_min", return_value=300.0), \
+                mock.patch.object(hh, "touched_since", return_value=True):
+            found = {c.path: c for c in hh.rule_tmp_large_trees()}
+        row = found[str(tree)]
+        assert "newest write 5.0 h ago" in row.reason, \
+            "a measured age inside the 24 h window needs no probe phrase"
+
+
+def test_tmp_large_trees_respects_the_rule_deadline(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        scratch = home / "private-tmp"
+        scratch.mkdir(parents=True, exist_ok=True)
+        for n in range(3):
+            blob(scratch / f"tree{n}" / "data.bin", 30)
+        with mock.patch.object(hh, "XCODE_SCRATCH_ROOT", scratch), \
+                mock.patch.object(hh, "TMP_LARGE_TREE_BYTES", 64 * 1024 * 1024), \
+                mock.patch.object(hh, "rule_out_of_time", return_value=True):
+            found = hh.rule_tmp_large_trees()
+        assert found == [], "a spent rule deadline reports nothing further"
+def test_dev_caches_includes_puppeteer_and_dot_cache_playwright(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "open_handles", return_value=0):
+        pup = home / ".cache" / "puppeteer"
+        pw = home / ".cache" / "ms-playwright"
+        for d in (pup, pw):
+            d.mkdir(parents=True)
+            f = d / "chromium.bin"
+            f.write_bytes(b"x" * (9 * 1024 * 1024))
+            settle(f)
+            settle(d)
+        paths = {c.path for c in hh.rule_dev_caches()}
+        assert str(pup) in paths and str(pw) in paths, paths
+
+
+def test_agent_state_prunes_stale_minimax_background_tasks(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "open_handles", return_value=0):
+        bg_root = home / ".minimax" / "background-tasks"
+        stale = bg_root / "bg_old-task"
+        fresh = bg_root / "bg_recent-task"
+        kept = bg_root / "bg_kept-task"
+        for d in (stale, fresh, kept):
+            d.mkdir(parents=True)
+            (d / "out.log").write_bytes(b"x" * 1024)
+        (kept / ".janitor-keep").write_text("keep")
+        old_hours = 4 * 24
+        _age(stale / "out.log", old_hours)
+        _age(stale, old_hours)
+        _age(kept / "out.log", old_hours)
+        _age(kept, old_hours)
+        paths = {c.path for c in hh.rule_agent_state()}
+        assert str(stale) in paths, paths
+        assert str(fresh) not in paths, paths
+        assert str(kept) not in paths, paths
+
+
+def test_agent_state_prunes_old_minimax_sqlite_migration_backups(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "open_handles", return_value=0):
+        backups = home / ".minimax" / "v2" / "sqlite" / "backups"
+        backups.mkdir(parents=True)
+        old_bak = backups / "runtime-state-before-v2-migration-123.sqlite"
+        fresh_bak = backups / "runtime-state-before-v3-migration-456.sqlite"
+        other = backups / "notes.txt"
+        for f in (old_bak, fresh_bak, other):
+            f.write_bytes(b"x" * (9 * 1024 * 1024))
+        _age(old_bak, 8 * 24)
+        _age(other, 8 * 24)
+        paths = {c.path for c in hh.rule_agent_state()}
+        assert str(old_bak) in paths, paths
+        assert str(fresh_bak) not in paths, paths
+        assert str(other) not in paths, paths
+        (backups / hh.KEEP_SENTINEL).write_text("keep", encoding="utf-8")
+        assert str(old_bak) not in {c.path for c in hh.rule_agent_state()}
+
+
+def test_xcode_scratch_tightens_idle_window_under_critical_disk_pressure(hh):
+    with fake_home(hh) as home, gates_open(hh):
+        tree = xcode_tree(home, days=4.0 / 24.0)
+        with mock.patch.object(hh, "read_disk_free", return_value=30.0):
+            refusal = hh._xcode_scratch_refusal(tree)
+            assert refusal is not None and "24 hours" in refusal, refusal
+        with mock.patch.object(hh, "read_disk_free", return_value=20.0):
+            assert hh._xcode_scratch_refusal(tree) is None
+        with mock.patch.object(hh, "read_disk_free", return_value=None):
+            refusal = hh._xcode_scratch_refusal(tree)
+            assert refusal is not None and "24 hours" in refusal, refusal
+
+
+def test_agent_state_prunes_idle_muse_worktree_next_cache(hh):
+    with fake_home(hh) as home, gates_open(hh), \
+            mock.patch.object(hh, "open_handles", return_value=0), \
+            mock.patch.object(hh, "read_disk_free", return_value=20.0):
+        wt_root = home / "Code" / "Socratic-Trade" / ".muse" / "worktrees"
+        stale_wt = wt_root / "subagent-v2-stale"
+        fresh_wt = wt_root / "subagent-v2-fresh"
+        kept_wt = wt_root / "subagent-v2-kept"
+        busy_wt = wt_root / "subagent-v2-busy"
+        sym_wt = wt_root / "subagent-v2-sym"
+        elsewhere = home / "elsewhere-next"
+        elsewhere.mkdir(parents=True)
+        (elsewhere / "bundle.bin").write_bytes(b"x" * (9 * 1024 * 1024))
+        for wt in (stale_wt, fresh_wt, kept_wt, busy_wt):
+            nd = wt / ".next"
+            nd.mkdir(parents=True)
+            (nd / "cache.bin").write_bytes(b"x" * (9 * 1024 * 1024))
+            (wt / "src").mkdir(parents=True)
+            (wt / "src" / "index.ts").write_text("export {};\n", encoding="utf-8")
+        sym_wt.mkdir(parents=True)
+        (sym_wt / ".next").symlink_to(elsewhere)
+        (kept_wt / ".next" / hh.KEEP_SENTINEL).write_text("keep", encoding="utf-8")
+        for wt in (stale_wt, kept_wt, busy_wt):
+            _age(wt / ".next" / "cache.bin", 5)
+            _age(wt / ".next", 5)
+        _age(kept_wt / ".next" / hh.KEEP_SENTINEL, 5)
+
+        def fake_cwd(path):
+            return path == str(busy_wt)
+
+        with mock.patch.object(hh, "repo_has_process_cwd", side_effect=fake_cwd):
+            assert hh.is_forbidden(str(stale_wt))
+            assert not hh.is_forbidden(str(stale_wt / ".next"))
+            cands = hh.rule_agent_state()
+            paths = {c.path for c in cands}
+        assert str(stale_wt / ".next") in paths, paths
+        assert str(fresh_wt / ".next") not in paths, paths
+        assert str(kept_wt / ".next") not in paths, paths
+        assert str(busy_wt / ".next") not in paths, paths
+        assert str(sym_wt / ".next") not in paths, paths
+        cand = next(c for c in cands if c.path == str(stale_wt / ".next"))
+        assert cand.recheck is not None
+        (stale_wt / ".next" / "fresh.bin").write_bytes(b"x")
+        assert cand.recheck() is not None, "recheck must block delete if cache became active"
 
 
 def main() -> int:

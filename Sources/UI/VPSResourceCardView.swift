@@ -41,9 +41,20 @@ struct VPSResourceCardView: View {
     @Environment(\.openSettings) private var openSettings
     /// Which part of the snapshot this card shows.
     var section: VPSResourceSection = .all
-    /// The overview keeps its process list in a separate, height-filling scroll area.
-    var showsProcesses = true
-    @StateObject private var control = ServerControl()
+    /// The store's shared controls when the caller passes them, so the
+    /// card's menus refuse while another surface's server action runs.
+    @StateObject private var control: ServerControl
+    @StateObject private var maintenance: ServerMaintenanceControl
+    @State private var showFullError = false
+
+    @MainActor
+    init(store: VPSStatusStore, section: VPSResourceSection = .all,
+         control: ServerControl? = nil, maintenance: ServerMaintenanceControl? = nil) {
+        _store = ObservedObject(wrappedValue: store)
+        self.section = section
+        _control = StateObject(wrappedValue: control ?? ServerControl())
+        _maintenance = StateObject(wrappedValue: maintenance ?? ServerMaintenanceControl())
+    }
 
     var body: some View {
         GroupBox {
@@ -57,13 +68,16 @@ struct VPSResourceCardView: View {
                     loadingView
                 } else if let snapshot = store.snapshot {
                     snapshotContent(snapshot)
+                    if section == .activity {
+                        ServerControlOutcomeView(control: control)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
         .overlay(alignment: .bottomLeading) {
-            if let outcome = control.lastOutcome {
+            if section != .activity, let outcome = control.lastOutcome {
                 Text(outcome.message)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
@@ -88,11 +102,18 @@ struct VPSResourceCardView: View {
             }
             Spacer()
             if let snapshot = store.snapshot {
-                Text(store.isStale
-                     ? "Snapshot \(snapshot.relativeTimeString()) · Earlier Reading"
-                     : "Snapshot \(snapshot.relativeTimeString())")
-                    .font(.system(size: 10))
-                    .foregroundStyle(store.isStale ? Color.orange : Color.secondary)
+                if store.isStale {
+                    Text("Stale · \(snapshot.relativeTimeString())")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.orange)
+                        .help(staleReason)
+                        .accessibilityLabel("Stale snapshot, \(snapshot.relativeTimeString())")
+                        .accessibilityValue(staleReason)
+                } else {
+                    Text("Snapshot \(snapshot.relativeTimeString())")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.secondary)
+                }
             }
             Button {
                 store.fetch(force: true)
@@ -105,6 +126,17 @@ struct VPSResourceCardView: View {
             .help("Refresh remote server resource status")
             .disabled(store.isLoading || store.configuredHost.isEmpty)
         }
+    }
+
+    /// Why the on-screen reading is stale, for the tooltip and screen
+    /// readers.  The body stays generic: a refresh failure is raw SSH text
+    /// and can name host internals, so only its first line travels here.
+    private var staleReason: String {
+        if let line = store.errorMessage?.split(whereSeparator: \.isNewline)
+            .map({ $0.trimmingCharacters(in: .whitespaces) }).first(where: { !$0.isEmpty }) {
+            return "Refresh Failed.\u{00A0}\(line)"
+        }
+        return "Refresh overdue.\u{00A0} Showing the last successful reading."
     }
 
     private var unconfiguredView: some View {
@@ -132,7 +164,15 @@ struct VPSResourceCardView: View {
                 Text(message)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .lineLimit(showFullError ? nil : 2)
+                    .textSelection(.enabled)
+                if message.count > 120 {
+                    Button(showFullError ? "Show Less" : "Show More") {
+                        showFullError.toggle()
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.link)
+                }
             }
             Spacer()
             Button("Retry") {
@@ -178,7 +218,7 @@ struct VPSResourceCardView: View {
             if section.showsHeadline, let pressure = snapshot.memoryPressure {
                 pagingReadings(pressure)
             }
-            if section.showsHeadline, let diagnostics = snapshot.storageDiagnostics {
+            if section.showsDevices, let diagnostics = snapshot.storageDiagnostics {
                 storageReadings(diagnostics)
             }
 
@@ -188,12 +228,21 @@ struct VPSResourceCardView: View {
             let tools = section.showsTools ? (snapshot.toolStatuses ?? []) : []
             let dirs = section.showsDirectories ? (snapshot.largestDirs ?? []) : []
             let workloads = section.showsCoolify ? (snapshot.coolify ?? []) : []
-            let processes = section.showsProcesses && showsProcesses ? (snapshot.processes ?? []) : []
-            if !processes.isEmpty {
-                processesView(processes)
-            }
-            if !workloads.isEmpty {
-                coolifyView(workloads)
+            let processes = section.showsProcesses ? (snapshot.processes ?? []) : []
+            if section == .activity {
+                Divider()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        processesView(processes)
+                        if !workloads.isEmpty { coolifyView(workloads) }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                .frame(maxHeight: .infinity, alignment: .topLeading)
+                .accessibilityLabel("Server processes and Coolify workloads")
+            } else {
+                if !processes.isEmpty { processesView(processes) }
+                if !workloads.isEmpty { coolifyView(workloads) }
             }
             if !dirs.isEmpty && (!dbs.isEmpty || !tools.isEmpty) {
                 HStack(alignment: .top, spacing: 16) {
@@ -277,8 +326,7 @@ struct VPSResourceCardView: View {
                     .font(.system(size: 11, weight: .bold, design: .rounded))
                     .foregroundStyle(.primary)
             }
-            ProgressView(value: min(max(cpu.pct / 100, 0), 1))
-                .tint(cpu.severity.color)
+            DashboardCpuHistoryView(history: store.cpuHistory, height: 26)
             Text("\(cpu.cores) cores • 1m load: \(String(format: "%.2f", cpu.load1))")
                 .font(.system(size: 10).monospacedDigit())
                 .foregroundStyle(.secondary)
@@ -286,6 +334,7 @@ struct VPSResourceCardView: View {
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+        .accessibilityElement(children: .combine)
     }
 
     private func memoryBox(_ mem: VPSMemory) -> some View {
@@ -307,6 +356,7 @@ struct VPSResourceCardView: View {
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+        .accessibilityElement(children: .combine)
     }
 
     private func deviceBox(_ device: VPSDevice, title: String, tooltip: String? = nil) -> some View {
@@ -333,6 +383,7 @@ struct VPSResourceCardView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
         .help(tooltip ?? device.note ?? title)
+        .accessibilityElement(children: .combine)
     }
 
     private func swapBox(_ swap: VPSSwap) -> some View {
@@ -354,6 +405,7 @@ struct VPSResourceCardView: View {
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+        .accessibilityElement(children: .combine)
     }
 
     private func appDbsRow(_ dbs: [String: Int64]) -> some View {
@@ -458,7 +510,7 @@ struct VPSResourceCardView: View {
                                 .foregroundStyle(.secondary)
                         }
                         ServerWorkloadActions(resource: resource, host: store.configuredHost, control: control,
-                                              didAct: { store.fetch(force: true) })
+                                              maintenance: maintenance, didAct: { store.fetch(force: true) })
                     }
                     .help("\(resource.name): \(resource.status)")
                 }
@@ -480,7 +532,7 @@ struct VPSResourceCardView: View {
                     .foregroundStyle(.secondary)
             }
             VStack(alignment: .leading, spacing: 3) {
-                ForEach(processes.prefix(12)) { process in
+                ForEach(processes) { process in
                     HStack(spacing: 8) {
                         Text(process.name)
                             .font(.system(size: 11))
@@ -503,9 +555,9 @@ struct VPSResourceCardView: View {
                             Text("Swap " + HogFormat.memory(UInt64(max(0, swap))))
                                 .font(.system(size: 9).monospacedDigit()).foregroundStyle(.secondary)
                         }
-                        if process.isTamed { Text("Tamed").font(.system(size: 9)).foregroundStyle(.secondary) }
+                        if process.tameState == .tamed { Text("Tamed").font(.system(size: 9)).foregroundStyle(.secondary) }
                         ServerProcessActions(process: process, host: store.configuredHost, control: control,
-                                             didAct: { store.fetch(force: true) })
+                                             maintenance: maintenance, didAct: { store.fetch(force: true) })
                     }
                 }
                 if processes.isEmpty {

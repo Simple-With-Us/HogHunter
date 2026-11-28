@@ -20,6 +20,10 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
     let processes: [VPSProcess]?
     /// The Coolify workloads the server runs.
     let coolify: [VPSCoolifyResource]?
+    /// The server's own maintenance record: the pressure gate its scheduled
+    /// run uses and the last finished runs.  Nil until the supplement that
+    /// publishes it is deployed.
+    let maintenance: VPSMaintenance?
 
     enum CodingKeys: String, CodingKey {
         case generatedAt = "generated_at"
@@ -37,6 +41,7 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         case directorySamples = "directory_samples"
         case processes
         case coolify
+        case maintenance
     }
 
     init(
@@ -54,7 +59,8 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         databaseSamples: [VPSSizeSample]? = nil,
         directorySamples: [VPSSizeSample]? = nil,
         processes: [VPSProcess]? = nil,
-        coolify: [VPSCoolifyResource]? = nil
+        coolify: [VPSCoolifyResource]? = nil,
+        maintenance: VPSMaintenance? = nil
     ) {
         self.generatedAt = generatedAt
         self.host = host
@@ -71,6 +77,7 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         self.directorySamples = directorySamples
         self.processes = processes
         self.coolify = coolify
+        self.maintenance = maintenance
     }
 
     private static let isoFormatter: ISO8601DateFormatter = {
@@ -85,8 +92,12 @@ struct VPSStatusSnapshot: Codable, Equatable, Sendable {
         return f
     }()
 
-    var generatedAtDate: Date? {
-        Self.isoFractionalFormatter.date(from: generatedAt) ?? Self.isoFormatter.date(from: generatedAt)
+    var generatedAtDate: Date? { Self.date(fromISO8601: generatedAt) }
+
+    /// One parser for every server timestamp, fractional or not.
+    static func date(fromISO8601 value: String?) -> Date? {
+        guard let value, !value.isEmpty else { return nil }
+        return isoFractionalFormatter.date(from: value) ?? isoFormatter.date(from: value)
     }
 
     func relativeTimeString(relativeTo now: Date = Date()) -> String {
@@ -319,6 +330,21 @@ struct VPSToolStatus: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// What the Mac knows about a server process's scheduling priority.
+///
+/// The collector reads `nice` from /proc, but a missing field is a real
+/// outcome (the stat read can fail), not priority zero — and Hog Hunter's
+/// own tame target is exactly 19, so any other reported value, however
+/// high, is not a process this tool tamed.
+enum ServerTameState: Equatable, Sendable {
+    /// The collector reported no priority.
+    case unknown
+    /// At Hog Hunter's tame target (nice 19).
+    case tamed
+    /// A reported priority other than 19.
+    case untamed
+}
+
 /// One process on the server, as the server's own collector saw it.
 ///
 /// The collector reads executable identity and the kernel's tick counters
@@ -362,7 +388,27 @@ struct VPSProcess: Codable, Equatable, Sendable, Identifiable {
         self.protectionReason = protectionReason
     }
 
-    var isTamed: Bool { (nice ?? 0) >= 15 }
+    /// Whether this process sits at Hog Hunter's tame target.  Unknown when
+    /// the collector reported no priority.
+    var tameState: ServerTameState {
+        guard let nice else { return .unknown }
+        return nice == 19 ? .tamed : .untamed
+    }
+
+    /// The tamed flag the phone renders, from the same state the action
+    /// filter and the Mac badge use, so the caption and the offered labels
+    /// can never disagree.
+    var phoneIsTamed: Bool? {
+        switch tameState {
+        case .tamed: return true
+        case .untamed: return false
+        case .unknown: return nil
+        }
+    }
+
+    /// True only at the tame target, matching `tameState`, so this flag can
+    /// never disagree with the action filter, the badges, or the caption.
+    var isTamed: Bool { tameState == .tamed }
 
     func can(action: String) -> Bool {
         guard let bootID, !bootID.isEmpty, let startTime, startTime > 0 else { return false }
@@ -568,4 +614,86 @@ struct VPSBlobStorage: Codable, Equatable, Sendable {
         case changeBytes = "change_bytes"
         case baselineStatus = "baseline_status"
     }
+}
+
+/// The server maintenance audit's summary, as the supplement publishes it.
+/// Counts and measured bytes only: no path, argument, owner or strategy name.
+struct VPSMaintenance: Codable, Equatable, Sendable {
+    struct Thresholds: Codable, Equatable, Sendable {
+        let usedPercentAtOrAbove: Double
+        let freeBytesAtOrBelow: Int64
+
+        enum CodingKeys: String, CodingKey {
+            case usedPercentAtOrAbove = "used_percent_at_or_above"
+            case freeBytesAtOrBelow = "free_bytes_at_or_below"
+        }
+    }
+
+    struct Run: Codable, Equatable, Sendable {
+        let finishedAt: String?
+        let mode: String?
+        let status: String?
+        /// Signed: the measured change in the volume's free space while the
+        /// run happened, which other activity can make negative.
+        let observedFreeDeltaBytes: Int64?
+        let removedCount: Int?
+        let candidateCount: Int?
+        let strategyCount: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case finishedAt = "finished_at"
+            case mode
+            case status
+            case observedFreeDeltaBytes = "observed_free_delta_bytes"
+            case reclaimedBytes = "reclaimed_bytes"
+            case removedCount = "removed_count"
+            case candidateCount = "candidate_count"
+            case strategyCount = "strategy_count"
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            finishedAt = try container.decodeIfPresent(String.self, forKey: .finishedAt)
+            mode = try container.decodeIfPresent(String.self, forKey: .mode)
+            status = try container.decodeIfPresent(String.self, forKey: .status)
+            // The figure was briefly published as reclaimed_bytes before it
+            // was renamed to its honest name; a snapshot from that window
+            // still shows its freed bytes instead of a blank.
+            observedFreeDeltaBytes = try container.decodeIfPresent(Int64.self, forKey: .observedFreeDeltaBytes)
+                ?? container.decodeIfPresent(Int64.self, forKey: .reclaimedBytes)
+            removedCount = try container.decodeIfPresent(Int.self, forKey: .removedCount)
+            candidateCount = try container.decodeIfPresent(Int.self, forKey: .candidateCount)
+            strategyCount = try container.decodeIfPresent(Int.self, forKey: .strategyCount)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encodeIfPresent(finishedAt, forKey: .finishedAt)
+            try container.encodeIfPresent(mode, forKey: .mode)
+            try container.encodeIfPresent(status, forKey: .status)
+            try container.encodeIfPresent(observedFreeDeltaBytes, forKey: .observedFreeDeltaBytes)
+            try container.encodeIfPresent(removedCount, forKey: .removedCount)
+            try container.encodeIfPresent(candidateCount, forKey: .candidateCount)
+            try container.encodeIfPresent(strategyCount, forKey: .strategyCount)
+        }
+
+        init(finishedAt: String?, mode: String?, status: String?,
+             observedFreeDeltaBytes: Int64?, removedCount: Int?,
+             candidateCount: Int?, strategyCount: Int?) {
+            self.finishedAt = finishedAt
+            self.mode = mode
+            self.status = status
+            self.observedFreeDeltaBytes = observedFreeDeltaBytes
+            self.removedCount = removedCount
+            self.candidateCount = candidateCount
+            self.strategyCount = strategyCount
+        }
+
+        var finishedAtDate: Date? { VPSStatusSnapshot.date(fromISO8601: finishedAt) }
+    }
+
+    let thresholds: Thresholds?
+    /// Optional so a maintenance object without the key (an older or partial
+    /// publisher) never discards the whole snapshot's readings.
+    let history: [Run]?
 }

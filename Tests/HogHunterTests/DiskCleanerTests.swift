@@ -347,6 +347,76 @@ final class DiskCleanerTests: XCTestCase {
         }
     }
 
+    func testIsSafeToDeleteAllowsStaleMiniMaxRuntimeState() {
+        let home = NSHomeDirectory()
+        let validPaths = [
+            "\(home)/.minimax/v2/sessions/2026/10/22",
+            "\(home)/.minimax/v2/workspaces/5d6c73ab0aa551369128141d4b49f0b1a70af5c70b0ba48ebff90f98d95e2759"
+        ]
+        for path in validPaths {
+            XCTAssertTrue(
+                cleaner.isSafeToDelete(url: URL(fileURLWithPath: path), category: .aiArtifacts),
+                "Stale MiniMax runtime state should be permitted under the AI artifacts category: \(path)"
+            )
+        }
+        // The runtime's own database is not session state and must survive.
+        let database = URL(fileURLWithPath: "\(home)/.minimax/v2/sqlite/runtime-state.sqlite")
+        XCTAssertFalse(
+            cleaner.isSafeToDelete(url: database, category: .aiArtifacts),
+            "The MiniMax runtime database must never be deleted"
+        )
+    }
+
+    func testScanAIArtifactsOffersOnlyStaleMiniMaxRuntimeState() {
+        let fm = FileManager.default
+        guard let home = tempDirectory else { return XCTFail("no temporary home") }
+        let cleaner = DiskCleaner(homeDirectory: home)
+        let staleDay = home.appendingPathComponent(".minimax/v2/sessions/2026/10/22")
+        let staleWorkspace = home.appendingPathComponent(".minimax/v2/workspaces/abcdef0123456789")
+        let freshDay = home.appendingPathComponent(".minimax/v2/sessions/2026/11/22")
+        for dir in [staleDay, staleWorkspace, freshDay] {
+            try! fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try! "payload".write(to: dir.appendingPathComponent("state.bin"), atomically: true, encoding: .utf8)
+        }
+        // Set the age after the payload lands, and age the payload with the
+        // folder: the scan gates on the newest write anywhere in the tree,
+        // so a fresh payload inside an aged folder would read as live.
+        let old = Date().addingTimeInterval(-21 * 24 * 3600)
+        for dir in [staleDay, staleWorkspace] {
+            try! fm.setAttributes([.modificationDate: old], ofItemAtPath: dir.appendingPathComponent("state.bin").path)
+            try! fm.setAttributes([.modificationDate: old], ofItemAtPath: dir.path)
+        }
+
+        let items = cleaner.scanCategory(.aiArtifacts)
+        let titles = Set(items.map(\.title))
+        // The scan's URLs come from a filesystem enumeration, which hands
+        // back the resolved `/private/var/...` form, while the fixtures are
+        // built from `temporaryDirectory`'s `/var/...` form.  Standardize
+        // both sides before comparing, as the cache scan tests do.
+        let paths = Set(items.map { $0.url.standardizedFileURL.path })
+        XCTAssertTrue(
+            titles.contains("MiniMax Session Day (22)"),
+            "a three week old session day should be offered, found: \(titles.sorted())"
+        )
+        XCTAssertTrue(
+            titles.contains("MiniMax Workspace (abcdef01)"),
+            "a three week old workspace should be offered, found: \(titles.sorted())"
+        )
+        XCTAssertTrue(
+            paths.contains(staleDay.standardizedFileURL.path),
+            "a three week old session day path should be offered, found: \(paths.sorted())"
+        )
+        XCTAssertTrue(
+            paths.contains(staleWorkspace.standardizedFileURL.path),
+            "a three week old workspace path should be offered, found: \(paths.sorted())"
+        )
+        XCTAssertFalse(paths.contains(freshDay.standardizedFileURL.path), "a fresh session day must not be offered")
+        for item in items where item.url.path.contains("/.minimax/") {
+            XCTAssertEqual(item.category, .aiArtifacts)
+            XCTAssertFalse(item.isSelected, "AI artifacts require explicit review")
+        }
+    }
+
     func testIsSafeToDeleteAllowsValidCategoryPaths() {
         let home = NSHomeDirectory()
 
@@ -1405,4 +1475,135 @@ final class DiskCleanerTests: XCTestCase {
         XCTAssertTrue(fm.fileExists(atPath: link.path))
         XCTAssertFalse(result.errors.isEmpty, "the skipped item is reported, not silent")
     }
+
+    func testScanCrashReporterOffersChildrenNotTheFolderItself() {
+        // The category's safety rule allows CrashReporter's CONTENTS and
+        // refuses the folder:  an item for the folder could never be
+        // cleaned and surfaced only as a safety error in every run's
+        // record.  The scan must offer the contents instead.
+        let fm = FileManager.default
+        let crashDir = tempDirectory
+            .appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
+        let retired = crashDir.appendingPathComponent("Retired", isDirectory: true)
+        try? fm.createDirectory(at: retired, withIntermediateDirectories: true)
+        try? "x".write(to: crashDir.appendingPathComponent("MyApp-2026-11-27.crash"), atomically: true, encoding: .utf8)
+        try? "y".write(to: retired.appendingPathComponent("old.diag"), atomically: true, encoding: .utf8)
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let crashItems = cleaner.scanLogsAndDiagnostics().filter { $0.subtitle.contains("CrashReporter") }
+        XCTAssertFalse(crashItems.isEmpty, "CrashReporter contents must be offered")
+        for item in crashItems {
+            XCTAssertNotEqual(item.url.standardizedFileURL.path, crashDir.standardizedFileURL.path,
+                              "the CrashReporter folder itself must never be an item")
+            XCTAssertTrue(cleaner.isSafeToDelete(url: item.url, category: item.category),
+                          "every offered item must pass the category's own safety rule: \(item.url.path)")
+        }
+    }
+
+    /// Scans the fixture CrashReporter directory and returns only its items.
+    private func crashReporterItems(under crashDir: URL, cleaner: DiskCleaner) -> [CleanItem] {
+        let prefix = crashDir.resolvingSymlinksInPath().standardizedFileURL.path + "/"
+        return cleaner.scanLogsAndDiagnostics().filter {
+            $0.url.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path + "/" == prefix
+        }
+    }
+
+    func testCleanCrashReporterChildrenPreservesTheFolderItself() async throws {
+        let fm = FileManager.default
+        let crashDir = tempDirectory
+            .appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
+        let retired = crashDir.appendingPathComponent("Retired", isDirectory: true)
+        try fm.createDirectory(at: retired, withIntermediateDirectories: true)
+        let crashFile = crashDir.appendingPathComponent("MyApp-2026-11-27.crash")
+        let oldDiag = retired.appendingPathComponent("old.diag")
+        try "x".write(to: crashFile, atomically: true, encoding: .utf8)
+        try "y".write(to: oldDiag, atomically: true, encoding: .utf8)
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let crashItems = crashReporterItems(under: crashDir, cleaner: cleaner)
+        XCTAssertEqual(crashItems.count, 2, "one file and one subfolder are offered")
+
+        let result = await cleaner.clean(items: crashItems, createSnapshot: false, exclusions: CleanerExclusions())
+
+        XCTAssertEqual(result.itemsRemoved, 2)
+        XCTAssertTrue(fm.fileExists(atPath: crashDir.path), "the CrashReporter folder itself must survive")
+        XCTAssertFalse(fm.fileExists(atPath: crashFile.path))
+        XCTAssertFalse(fm.fileExists(atPath: retired.path))
+    }
+
+    func testCleanCrashReporterChildHonorsExclusions() async throws {
+        let fm = FileManager.default
+        let crashDir = tempDirectory
+            .appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
+        try fm.createDirectory(at: crashDir, withIntermediateDirectories: true)
+        let keep = crashDir.appendingPathComponent("keep.crash")
+        let drop = crashDir.appendingPathComponent("drop.crash")
+        try "x".write(to: keep, atomically: true, encoding: .utf8)
+        try "y".write(to: drop, atomically: true, encoding: .utf8)
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let crashItems = crashReporterItems(under: crashDir, cleaner: cleaner)
+        XCTAssertEqual(crashItems.count, 2)
+        var exclusions = CleanerExclusions()
+        exclusions.addPath(keep.path)
+
+        let result = await cleaner.clean(items: crashItems, createSnapshot: false, exclusions: exclusions)
+
+        XCTAssertEqual(result.itemsRemoved, 1, "the excluded child is skipped")
+        XCTAssertTrue(fm.fileExists(atPath: keep.path), "an excluded crash report survives")
+        XCTAssertFalse(fm.fileExists(atPath: drop.path))
+    }
+
+    func testCleanCrashReporterChildSymlinkWithEscapingTargetIsRefused() async throws {
+        // A link inside CrashReporter whose target lives outside the
+        // category's scope must not smuggle that target into the clean:
+        // the refusal that used to fire on the folder itself now guards
+        // every child the scan offers.
+        let fm = FileManager.default
+        let outside = tempDirectory.appendingPathComponent("Elsewhere", isDirectory: true)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        let secret = outside.appendingPathComponent("secret.txt")
+        try Data("important".utf8).write(to: secret)
+        let crashDir = tempDirectory
+            .appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
+        try fm.createDirectory(at: crashDir, withIntermediateDirectories: true)
+        let link = crashDir.appendingPathComponent("offload")
+        try fm.createSymbolicLink(at: link, withDestinationURL: outside)
+
+        let cleaner = DiskCleaner(homeDirectory: tempDirectory)
+        let crashItems = crashReporterItems(under: crashDir, cleaner: cleaner)
+        XCTAssertTrue(crashItems.isEmpty, "discovery refuses links before reading their target")
+        // Independently exercise delete-time validation of a stale/manual item,
+        // even when discovery already refused the escaping target.
+        let staleItem = CleanItem(category: .logsAndDiagnostics, title: "Escaping link",
+            subtitle: link.path, url: link, bytes: 9, fileCount: 1,
+            lastModified: nil, isSelected: true, isSymlink: true)
+        let result = await cleaner.clean(items: [staleItem], createSnapshot: false, exclusions: CleanerExclusions())
+
+        XCTAssertEqual(result.itemsRemoved, 0, "a link whose target escapes the category scope deletes nothing")
+        XCTAssertTrue(result.errors.contains { $0.contains("symlink target") }, "the escape is recorded, not silent")
+        XCTAssertTrue(fm.fileExists(atPath: secret.path), "the outside target survives")
+        XCTAssertTrue(fm.fileExists(atPath: link.path), "the link itself survives")
+    }
+    func testCrashReporterChildrenShareTraversalDeadline() throws {
+        let fm = FileManager.default
+        let crashDir = tempDirectory.appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
+        for index in 0..<40 {
+            let child = crashDir.appendingPathComponent("group-\(index)", isDirectory: true)
+            try fm.createDirectory(at: child, withIntermediateDirectories: true)
+            for file in 0..<20 {
+                try "x".write(to: child.appendingPathComponent("report-\(file).crash"), atomically: true, encoding: .utf8)
+            }
+        }
+        var clock: TimeInterval = 0
+        let cleaner = DiskCleaner(scanUptime: {
+            clock += 0.001
+            return clock
+        }, homeDirectory: tempDirectory)
+        let items = crashReporterItems(under: crashDir, cleaner: cleaner)
+        XCTAssertFalse(items.isEmpty)
+        XCTAssertLessThan(items.count, 40, "child walks must not each reset the root traversal deadline")
+        XCTAssertLessThan(clock, 1, "one target cap, not forty target caps or the global eight-second cap")
+    }
+
 }

@@ -4,33 +4,83 @@ import SwiftUI
 
 /// Disk cleaner view inside Hog Hunter's Storage window.
 /// Offers category-by-category breakdown, selective item inspection, and safe one-click reclamation.
+/// How tall the cleaner's scroll region actually got.
+///
+/// The category list was once squeezed into a sliver because the header's
+/// spacer took every spare point, so a layout test needs the real number
+/// rather than a guess about how much space a header takes.
+struct DiskCleanerScrollHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct DiskCleanerView: View {
     @ObservedObject var store: DiskCleanerStore
     var isTabActive: Bool = true
     var autoScanOnAppear: Bool = true
     var showInlineTierSelector: Bool = false
     @State private var showExclusionsSheet = false
-    /// The unattended clean regimen, as the owner set it.
-    @State private var regimen = CleanRegimen.load()
-    /// The one runner the app uses.  Observed so the summary and the next
-    /// run time refresh themselves after a run.
-    @ObservedObject private var regimenRunner = CleanRegimenRunner.shared
+    /// Startup-volume space, refreshed off the main actor.  Reading
+    /// `DiskSpace.current()` in `body` re-ran CacheDelete purgeable
+    /// accounting on every redraw and hung the panel on a full disk
+    /// (HOGHUNTER-5); the store tick already proved that shape.
+    @State private var volumeSpace: DiskSpace?
+    @State private var volumeRefreshInFlight = false
+    @State private var volumeRefreshPending = false
+
+    /// One refresh at a time: scan progress flips `store.state` often,
+    /// and stacked purgeable-capacity reads would stall the very panel
+    /// they describe.  A change that lands mid-read is remembered and
+    /// gets one trailing refresh, so the gauge never sticks stale.
+    private func refreshVolumeSpace() {
+        guard !volumeRefreshInFlight else { volumeRefreshPending = true; return }
+        volumeRefreshInFlight = true
+        Task { @MainActor in
+            let space = await Task.detached(priority: .utility) { DiskSpace.current() }.value
+            volumeSpace = space
+            volumeRefreshInFlight = false
+            if volumeRefreshPending {
+                volumeRefreshPending = false
+                refreshVolumeSpace()
+            }
+        }
+    }
+    @Environment(\.openSettings) private var openSettings
+    @AppStorage(HogStore.Key.settingsTab) private var settingsTab = SettingsTab.general.rawValue
+    @State private var regimen = CleanRegimen.load().sanitized()
 
     var body: some View {
         VStack(spacing: 10) {
-            if showInlineTierSelector {
-                tierSelector
+            // One scroll region for the whole tab.  The category list used to
+            // live in a ScrollView of its own below the header and the regimen
+            // block, and the header's spacer took every spare point, so the
+            // list was left a sliver at the bottom of the window and only that
+            // sliver scrolled.  Everything above the action bar scrolls
+            // together now, and the action bar stays pinned where it was.
+            ScrollView {
+                VStack(spacing: 10) {
+                    if showInlineTierSelector {
+                        tierSelector
+                    }
+                    if store.selectedTier == .extreme {
+                        extremeDisclaimerBanner
+                    }
+                    heroHeader
+                    Text("Temp files appear after they have sat for at least \(store.tempFilePolicy.hoursLabel) hours.\u{00A0} Change this in Settings, then Cleaner.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    maintenanceScheduleLink
+                    contentBody
+                }
             }
-            if store.selectedTier == .extreme {
-                extremeDisclaimerBanner
-            }
-            heroHeader
-            Text("Temp files appear after they have sat for at least \(store.tempFilePolicy.hoursLabel) hours.\u{00A0} Change this in Settings, then Cleaner.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            regimenSection
-            contentBody
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(key: DiskCleanerScrollHeightKey.self, value: proxy.size.height)
+                }
+            )
             bottomBar
         }
         .onAppear {
@@ -58,8 +108,14 @@ struct DiskCleanerView: View {
         .onDisappear {
             store.cancelScan()
         }
+        .task { refreshVolumeSpace() }
+        .onChange(of: store.state) { _ in refreshVolumeSpace() }
         .sheet(isPresented: $showExclusionsSheet) {
             CleanerExclusionsSheet(store: store)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            let current = CleanRegimen.load().sanitized()
+            if current != regimen { regimen = current }
         }
         .confirmationDialog(
             "Confirm \(store.selectedTier.title)",
@@ -75,153 +131,27 @@ struct DiskCleanerView: View {
         }
     }
 
-    // MARK: - Automatic Cleanup Regimen
-
-    /// The unattended clean regimen.
-    ///
-    /// It is off by default and the owner turns it on.  An unattended delete
-    /// is a decision a person makes, not something an app grants itself, so
-    /// the toggle sits here beside the rest of the reclaim controls rather
-    /// than behind a settings screen nobody opens.
-    private var regimenSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Toggle("Automatic Cleanup", isOn: Binding(
-                    get: { regimen.isEnabled },
-                    set: { enabled in
-                        regimen.isEnabled = enabled
-                        regimen = regimen.sanitized()
-                        regimen.save()
-                        // Turning it on schedules the first run one interval
-                        // out.  It does not fire a clean the moment the
-                        // switch flips: an unattended delete starts at a time
-                        // the owner chose, and "Run Now" is right beside it.
-                        if regimen.isEnabled {
-                            regimenRunner.scheduleFromNow()
-                        } else {
-                            regimenRunner.refreshSchedule()
-                        }
-                    }
-                ))
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .font(.system(size: 11))
-
-                Spacer()
-
-                if regimen.isEnabled {
-                    Picker("Every", selection: Binding(
-                        get: { regimen.intervalHours },
-                        set: { hours in
-                            regimen.intervalHours = hours
-                            regimen = regimen.sanitized()
-                            regimen.save()
-                            // A new interval is a new schedule, so the clock
-                            // starts again from now.
-                            regimenRunner.scheduleFromNow()
-                        }
-                    )) {
-                        ForEach(Self.regimenIntervals, id: \.self) { hours in
-                            Text(hours == 1 ? "1 Hour" : "\(Int(hours)) Hours")
-                                .tag(hours)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .controlSize(.small)
-                    .font(.system(size: 11))
-                    .labelsHidden()
-
-                    Button {
-                        regimenRunner.runNow()
-                    } label: {
-                        Label("Run Now", systemImage: "play.circle")
-                            .font(.system(size: 11))
-                    }
-                    .controlSize(.small)
-                    .disabled(regimenRunner.isRunning)
-                }
+    private var maintenanceScheduleLink: some View {
+        HStack {
+            Text(regimen.isEnabled ? automaticTrashSummary : "Automatic Cleanup is off.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Maintenance Settings…") {
+                settingsTab = SettingsTab.maintenance.rawValue
+                NSApp.activate(ignoringOtherApps: true)
+                openSettings()
+                HogActions.scheduleFrontSettingsWindow()
             }
-
-            if regimen.isEnabled {
-                HStack(spacing: 8) {
-                    Toggle("Empty Trash When Space Is Low", isOn: Binding(
-                        get: { regimen.emptyTrashBelowGB != nil },
-                        set: { on in
-                            regimen.emptyTrashBelowGB = on ? Self.trashValveDefaultGB : nil
-                            regimen = regimen.sanitized()
-                            regimen.save()
-                        }
-                    ))
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .font(.system(size: 11))
-
-                    Spacer()
-
-                    if regimen.emptyTrashBelowGB != nil {
-                        Picker("Below", selection: Binding(
-                            get: { regimen.emptyTrashBelowGB ?? Self.trashValveDefaultGB },
-                            set: { gb in
-                                regimen.emptyTrashBelowGB = gb
-                                regimen = regimen.sanitized()
-                                regimen.save()
-                            }
-                        )) {
-                            ForEach(Self.trashValveThresholds, id: \.self) { gb in
-                                Text("\(Int(gb)) GB Free").tag(gb)
-                            }
-                            if let current = regimen.emptyTrashBelowGB,
-                               !Self.trashValveThresholds.contains(current) {
-                                // A line a hand-edited blob or Infisical set
-                                // outside the picker stays visible instead
-                                // of leaving the menu blank.
-                                Text("\(Int(current)) GB Free").tag(current)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .controlSize(.small)
-                        .font(.system(size: 11))
-                        .labelsHidden()
-                    }
-                }
-
-                Text("The Trash empties permanently during a scheduled run when free space is at or below this line.\u{00A0} Nothing in it can be recovered afterwards.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-
-                if let next = regimenRunner.nextRunDate {
-                    Text("Next run \(next.formatted(date: .abbreviated, time: .shortened))")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-                if let waiting = regimenRunner.waitingReason {
-                    Text(waiting)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-                if let summary = regimenRunner.lastSummary {
-                    Text(summary)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                Text("Off.\u{00A0} Hog Hunter never deletes anything on its own until this is turned on.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-            }
+            .buttonStyle(.link)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 10)
-        .padding(.horizontal, 10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
     }
 
-    /// The intervals the picker offers, in hours.
-    private static let regimenIntervals: [Double] = [1, 4, 12, 24]
-
-    /// Where the trash valve starts, and the lines the picker offers.
-    private static let trashValveDefaultGB: Double = 40
-    private static let trashValveThresholds: [Double] = [15, 25, 40, 60, 80]
+    private var automaticTrashSummary: String {
+        guard let gb = regimen.emptyTrashBelowGB else { return "Automatic Trash emptying is off." }
+        guard !store.exclusions.isCategoryExcluded(.trash) else { return "Trash is excluded from cleanup." }
+        return "Scheduled Trash emptying: at or below \(gb.formatted()) GB free."
+    }
 
     // MARK: - Tier Selector & Disclaimer
 
@@ -474,8 +404,6 @@ struct DiskCleanerView: View {
         .help("Available space includes macOS purgeable capacity.\u{00A0} Selected item sizes do not predict a free-space gain: Trash and safety snapshots can retain blocks.")
     }
 
-    private var volumeSpace: DiskSpace? { DiskSpace.current() }
-
     private var volumeUsedFraction: Double { volumeSpace?.usedFraction ?? 0 }
 
     private var volumeCaption: String {
@@ -500,25 +428,29 @@ struct DiskCleanerView: View {
     @ViewBuilder
     private var contentBody: some View {
         if let report = store.report {
-            ScrollView {
-                LazyVStack(spacing: 8) {
-                    ForEach(report.categories) { catReport in
-                        CategoryCardView(catReport: catReport, store: store)
-                    }
+            // The list lives inside the tab's one scroll region, so it takes
+            // the room the window has instead of what is left over.
+            LazyVStack(spacing: 8) {
+                ForEach(report.categories) { catReport in
+                    CategoryCardView(catReport: catReport, store: store)
                 }
-                .padding(.vertical, 2)
             }
-        } else {
-            // No progress indicator here.  This branch used to render its own
-            // spinner and the header's `.scanning` case rendered a second one,
-            // and both were on screen for the whole scan: `state` is `.scanning`
-            // while `report` is still nil, because `report` is only assigned
-            // once the scan completes.  Two gates, one question, two spinners.
-            // The same mistake put "Maintain" on screen twice in
-            // `MaintainView.header`.  The status header owns progress now;
-            // the body only has to decide whether there are results to show.
-            Spacer()
+            .padding(.vertical, 2)
+        } else if store.state == .idle && !(autoScanOnAppear && isTabActive) {
+            // Manual-scan mode before the first scan: the header's idle case
+            // says "Ready to scan", and this names the empty list.  Auto-scan
+            // owns the idle moment otherwise, so the empty never flashes
+            // between appear and the scan starting.
+            Text("No results yet.\u{00A0} Press Scan to look for clutter.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 12)
         }
+        // No report and no placeholder otherwise.  The header's `.scanning`
+        // case owns progress now: it used to render a spinner here as well,
+        // and both were on screen for the whole scan.  The body only has to
+        // decide whether there are results to show.
     }
 
     // MARK: - Bottom Bar

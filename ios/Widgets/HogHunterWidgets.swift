@@ -11,7 +11,7 @@ struct HogHunterWidgets: Widget {
                 .containerBackground(.fill.tertiary, for: .widget)
         }
         .configurationDisplayName("Hog Hunter")
-        .description("Track Mac CPU and RAM.  Clean asks before anything is removed.")
+        .description("Track Mac and server CPU and RAM.  Clean asks before anything is removed.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }

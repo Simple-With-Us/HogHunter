@@ -113,6 +113,8 @@ targets:
       - path: ios/Sources/CompanionKeychain.swift
       # Foundation-only: which rows each Server tab section shows.
       - path: ios/Sources/CompanionServerSection.swift
+      # Foundation-only: dashboard freshness and 429 countdown maths.
+      - path: ios/Sources/CompanionFreshness.swift
     dependencies:
       - target: HogHunter
     settings:
@@ -210,6 +212,12 @@ schemes:
       targets:
         HogHunter: all
         HogHunterTests: [test]
+      # XcodeGen 2.47 made generated schemes default Override Architectures
+      # to "Match Run Destination": a destination-less xcodebuild then builds
+      # only the host architecture and silently drops the x86_64 half of the
+      # universal release (scripts/mac-release-build.sh passes no -destination).
+      # "Use Target Settings" restores the target ARCHS the release passes.
+      buildArchitectures: useTargetSettings
     test:
       targets:
         - HogHunterTests

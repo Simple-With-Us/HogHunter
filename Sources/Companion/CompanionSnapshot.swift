@@ -436,7 +436,7 @@ struct CompanionSettingsSummary: Codable, Equatable, Sendable {
     /// True when macOS has refused Hog Hunter permission to notify.
     var notificationsDenied: Bool? = nil
     /// The Mac's appearance: "System", "Light" or "Dark".
-    var appearance: String = "System"
+    var appearance: String = "Light"
     /// The refresh cadence the Mac uses while its panel is closed, in seconds.
     var backgroundRefreshInterval: Double = 10
     /// What the Mac's menu bar shows: "History Bars & %", "Machine CPU", "Top Hog" or
@@ -471,7 +471,7 @@ extension CompanionSettingsSummary {
         webhookHost = try container.decodeIfPresent(String.self, forKey: .webhookHost)
         webhookStatus = try container.decodeIfPresent(String.self, forKey: .webhookStatus)
         notificationsDenied = try container.decodeIfPresent(Bool.self, forKey: .notificationsDenied)
-        appearance = try container.decodeIfPresent(String.self, forKey: .appearance) ?? "System"
+        appearance = try container.decodeIfPresent(String.self, forKey: .appearance) ?? "Light"
         backgroundRefreshInterval = try container.decodeIfPresent(Double.self, forKey: .backgroundRefreshInterval) ?? 10
         menuBarLabelMode = try container.decodeIfPresent(String.self, forKey: .menuBarLabelMode) ?? "History Bars & %"
         sort = try container.decodeIfPresent(String.self, forKey: .sort) ?? "CPU"
@@ -1145,6 +1145,9 @@ struct CompanionAppStorageRow: Codable, Equatable, Identifiable {
     var anyApproximate: Bool
     /// True when hidden bytes are at least 5x the bundle and over 200 MB.
     var isHiddenHeavy: Bool
+    /// Whether the app was running when the Mac scanned.  Optional so an
+    /// older Mac's snapshot still decodes; nil means the Mac did not say.
+    var isRunning: Bool? = nil
 }
 
 struct CompanionNetworkRow: Codable, Equatable, Identifiable {
@@ -1295,6 +1298,73 @@ enum CompanionServerActionOutcome: Equatable, Sendable {
     }
 }
 
+/// The server's own maintenance record.  Counts and measured bytes only, so
+/// the phone never learns a path, an argument or a strategy name from it.
+struct CompanionServerMaintenance: Codable, Equatable, Sendable {
+    /// How many finished runs travel; the server keeps the same bound.
+    static let historyLimit = 10
+    /// The scheduled run wakes at or above this used percent...
+    var thresholdUsedPercent: Double? = nil
+    /// ...or at or below this free level.
+    var thresholdFreeBytes: Int64? = nil
+    var history: [CompanionServerMaintenanceRun]? = nil
+}
+
+/// One finished server maintenance run.
+struct CompanionServerMaintenanceRun: Codable, Equatable, Sendable {
+    var finishedAt: Date? = nil
+    var mode: String? = nil
+    var status: String? = nil
+    /// Signed measured free-space change; other activity can make it negative.
+    var observedFreeDeltaBytes: Int64? = nil
+    var removedCount: Int? = nil
+    var candidateCount: Int? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case finishedAt
+        case mode
+        case status
+        case observedFreeDeltaBytes
+        case reclaimedBytes
+        case removedCount
+        case candidateCount
+    }
+
+    init(finishedAt: Date? = nil, mode: String? = nil, status: String? = nil,
+         observedFreeDeltaBytes: Int64? = nil, removedCount: Int? = nil,
+         candidateCount: Int? = nil) {
+        self.finishedAt = finishedAt
+        self.mode = mode
+        self.status = status
+        self.observedFreeDeltaBytes = observedFreeDeltaBytes
+        self.removedCount = removedCount
+        self.candidateCount = candidateCount
+    }
+
+    /// A snapshot persisted while the figure was briefly named reclaimedBytes
+    /// keeps its value instead of arriving blank after an update.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        finishedAt = try container.decodeIfPresent(Date.self, forKey: .finishedAt)
+        mode = try container.decodeIfPresent(String.self, forKey: .mode)
+        status = try container.decodeIfPresent(String.self, forKey: .status)
+        observedFreeDeltaBytes = try container.decodeIfPresent(Int64.self, forKey: .observedFreeDeltaBytes)
+            ?? container.decodeIfPresent(Int64.self, forKey: .reclaimedBytes)
+        removedCount = try container.decodeIfPresent(Int.self, forKey: .removedCount)
+        candidateCount = try container.decodeIfPresent(Int.self, forKey: .candidateCount)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(finishedAt, forKey: .finishedAt)
+        try container.encodeIfPresent(mode, forKey: .mode)
+        try container.encodeIfPresent(status, forKey: .status)
+        try container.encodeIfPresent(observedFreeDeltaBytes, forKey: .observedFreeDeltaBytes)
+        try container.encodeIfPresent(removedCount, forKey: .removedCount)
+        try container.encodeIfPresent(candidateCount, forKey: .candidateCount)
+    }
+}
+
 /// What a server maintenance scan or run found, in the Mac card's words.
 struct CompanionServerMaintenanceSummary: Codable, Equatable, Sendable {
     var mode: String
@@ -1370,6 +1440,9 @@ struct CompanionServerStatus: Codable, Equatable, Sendable {
     var processes: [CompanionServerProcess]? = nil
     var processCount: Int? = nil
     var workloads: [CompanionServerWorkload]? = nil
+    /// The server's own maintenance record: the pressure gate its scheduled
+    /// run uses and the last finished runs, newest first.
+    var maintenance: CompanionServerMaintenance? = nil
 
     /// Whether anything in the block came from a reading.
     var hasReading: Bool { generatedAt != nil || cpu != nil || memory != nil || devices?.isEmpty == false }
@@ -1614,7 +1687,9 @@ struct CompanionServerRefreshResponse: Codable, Equatable, Sendable {
         case 404:
             return CompanionServerRefreshResponse(status: "rejected", error: "This Mac's copy of Hog Hunter is older than this app and cannot refresh the server from iPhone.\u{00A0} Update it on the Mac.")
         case 429:
-            return CompanionServerRefreshResponse(status: "throttled", error: "The server was just refreshed.\u{00A0} Wait a moment, then try again.")
+            // A numberless 429 still means "wait the interval", so the phone
+            // gets the full one and its countdown runs.
+            return CompanionServerRefreshResponse(status: "throttled", error: "The server was just refreshed.\u{00A0} Wait a moment, then try again.", retryAfter: Int(CompanionServerRefresh.minimumInterval))
         default:
             return CompanionServerRefreshResponse(status: "rejected", error: "The Mac did not refresh the server.")
         }
@@ -1680,6 +1755,26 @@ extension CompanionSnapshot {
         copy.server = nil
         copy.flaggedIssues = flaggedIssues?.filter { !$0.isServer }
         copy.flaggedIssuesCoverServer = flaggedIssues == nil ? nil : false
+        return copy
+    }
+
+    /// The copy the widget's shared container holds: no server internals, plus
+    /// the four numbers the widget draws.  The widget used to get none of the
+    /// server, so it showed the Mac alone.  Only the state, the reading times
+    /// and the CPU and memory percentages cross: no host, error text, process,
+    /// workload, database or directory name.  A phone that may not see the
+    /// server (the opt-in is off, or this link reads the plain snapshot) gets
+    /// the stripped copy, as before.
+    func widgetCopy() -> CompanionSnapshot {
+        var copy = withoutServerDetail()
+        guard remoteServerStatusAllowed != false, case .available(let server) = serverAccess else { return copy }
+        copy.server = CompanionServerStatus(
+            state: server.state,
+            generatedAt: server.generatedAt,
+            fetchedAt: server.fetchedAt,
+            cpu: server.cpu.map { CompanionServerCPU(percent: $0.percent, percentText: $0.percentText, severity: $0.severity) },
+            memory: server.memory.map { CompanionServerMeter(percent: $0.percent, percentText: $0.percentText, severity: $0.severity) }
+        )
         return copy
     }
 }

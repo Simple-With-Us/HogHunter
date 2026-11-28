@@ -58,7 +58,9 @@ jobs:
 
   test:
     runs-on: macos-26
-    timeout-minutes: 60
+    # Build and test took ~13 min on run 43848232127; a slow runner can need
+    # two full 2400s capture attempts, so the job budget fits both (~95 min).
+    timeout-minutes: 100
     env:
       HOGHUNTER_RENDER_DIR: ${{ github.workspace }}/screenshots/native-layout
       TEST_RUNNER_HOGHUNTER_RENDER_DIR: ${{ github.workspace }}/screenshots/native-layout
@@ -126,6 +128,9 @@ jobs:
       - name: Require server maintenance render
         run: test -s "$HOGHUNTER_RENDER_DIR/hh207-server-maintenance-schedule-off.png" && test -s "$HOGHUNTER_RENDER_DIR/hh207-server-maintenance-incomplete-inventory.png"
 
+      - name: Require the storage cleaner render
+        run: test -s "$HOGHUNTER_RENDER_DIR/hh236-storage-cleaner-tab.png"
+
       - name: Build iOS companion
         run: |
           xcodebuild -scheme HogHunterIOS -destination 'generic/platform=iOS Simulator' -derivedDataPath build-ios build \
@@ -144,14 +149,31 @@ jobs:
 
       - name: Capture app screenshots
         if: ${{ !cancelled() }}
-        timeout-minutes: 35
+        timeout-minutes: 85
         # The supervisor finishes when capture exits and kills its whole process
         # group, including orphan helpers that could retain runner output handles.
         # Budget: the first iOS format alone takes ~6 min on these runners
-        # (simulator boot dominates), and five formats plus the macOS phase
-        # need ~25 min.  The old 480s cap always fired mid-way through the
-        # second format, after the required screens were already saved.
-        run: python3 scripts/bounded-process.py --timeout 1980 --grace 2 -- bash scripts/capture-app-screenshots.sh
+        # (simulator boot dominates).  Run 43848232127 measured the five iOS
+        # formats plus extras and scenes at ~32 min, so the macOS phase started
+        # with seconds left on the old 1980s budget and died mid-capture
+        # (exit 124); 2400s covers that run with headroom.  A deadline kill
+        # (exit 124) gets one full bounded retry before the step fails, so a
+        # slow runner still ships screenshots; content failures still fail
+        # without a retry.
+        run: |
+          status=0
+          python3 scripts/bounded-process.py --timeout 2400 --grace 2 -- bash scripts/capture-app-screenshots.sh || status=$?
+          if [[ "$status" -eq 124 ]]; then
+            echo "Capture exceeded its 2400s deadline once; retrying with the same bounded budget."
+            # A timed-out attempt can leave partial PNGs in the render dir; start the
+            # retry clean so the uploaded artifact is one coherent capture set.
+            rm -rf "$GITHUB_WORKSPACE/screenshots/native-layout"
+            # A successful retry must clear the deadline code, or the step still exits
+            # 124 and discards the good capture (review thread PRRT_kwDOURk22867MQJ1).
+            status=0
+            python3 scripts/bounded-process.py --timeout 2400 --grace 2 -- bash scripts/capture-app-screenshots.sh || status=$?
+          fi
+          exit "$status"
 
       - name: Upload screenshots artifact
         timeout-minutes: 3

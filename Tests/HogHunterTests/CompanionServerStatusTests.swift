@@ -33,7 +33,8 @@ private func iso(_ date: Date) -> String {
 /// A reading with one of everything, and a canary in every field that names
 /// a server internal.  `withSizes: false` leaves out the databases and
 /// directories, which a real store would record in the shared growth history.
-private func fullReading(now: Date = Date(), withSizes: Bool = true) -> VPSStatusSnapshot {
+private func fullReading(now: Date = Date(), withSizes: Bool = true,
+                         maintenance: VPSMaintenance? = nil) -> VPSStatusSnapshot {
     VPSStatusSnapshot(
         generatedAt: iso(now.addingTimeInterval(-60)),
         host: canaryHost,
@@ -66,7 +67,25 @@ private func fullReading(now: Date = Date(), withSizes: Bool = true) -> VPSStatu
             VPSCoolifyResource(uuid: "uuid-canary", name: canaryWorkload, container: "container-canary", type: "service", status: "running",
                                cpuPercent: nil, memoryBytes: nil, image: "image-canary", startedAt: "2026-11-04T00:00:00Z",
                                containerID: String(repeating: "a", count: 64)),
-        ]
+        ],
+        maintenance: maintenance
+    )
+}
+
+private func maintenanceRecord(runs: Int, now: Date = Date()) -> VPSMaintenance {
+    VPSMaintenance(
+        thresholds: VPSMaintenance.Thresholds(usedPercentAtOrAbove: 80, freeBytesAtOrBelow: 25 * 1024 * 1024 * 1024),
+        history: (0..<runs).map { index in
+            VPSMaintenance.Run(
+                finishedAt: iso(now.addingTimeInterval(-Double(index) * 600)),
+                mode: index == 0 ? "run" : "scheduled",
+                status: "ran",
+                observedFreeDeltaBytes: 1_000 + Int64(index),
+                removedCount: index,
+                candidateCount: index + 2,
+                strategyCount: 3
+            )
+        }
     )
 }
 
@@ -124,6 +143,72 @@ final class CompanionServerStatusBuilderTests: XCTestCase {
         let status = build(reading: fullReading(now: sent), now: sent)
         XCTAssertEqual(status.state, "ok")
         XCTAssertEqual(status.resolvedState(now: sent.addingTimeInterval(CompanionServerStatus.staleAfter + 120)), .stale)
+    }
+
+    func testTheServerMaintenanceRecordTravelsBoundedAndDated() {
+        let now = Date()
+        let status = build(reading: fullReading(now: now, maintenance: maintenanceRecord(runs: 12, now: now)), now: now)
+        let maintenance = try? XCTUnwrap(status.maintenance)
+        XCTAssertEqual(maintenance?.thresholdUsedPercent, 80)
+        XCTAssertEqual(maintenance?.thresholdFreeBytes, 25 * 1024 * 1024 * 1024)
+        XCTAssertEqual(maintenance?.history?.count, CompanionServerMaintenance.historyLimit, "the server's bound travels, not its whole log")
+        let newest = maintenance?.history?.first
+        XCTAssertNotNil(newest?.finishedAt, "the finished time must parse")
+        XCTAssertEqual(newest?.mode, "run")
+        XCTAssertEqual(newest?.observedFreeDeltaBytes, 1_000)
+        XCTAssertEqual(newest?.removedCount, 0)
+        XCTAssertEqual(newest?.candidateCount, 2)
+    }
+
+    func testAReadingWithoutAMaintenanceRecordCarriesNone() {
+        let status = build(reading: fullReading())
+        XCTAssertNil(status.maintenance, "older servers keep working")
+    }
+
+    func testServerAPIWithoutThresholdsStillPublishesHistory() {
+        let record = VPSMaintenance(thresholds: nil, history: maintenanceRecord(runs: 2).history)
+        let status = build(reading: fullReading(maintenance: record))
+        XCTAssertNil(status.maintenance?.thresholdUsedPercent)
+        XCTAssertEqual(status.maintenance?.history?.count, 2)
+    }
+
+    func testSupplementMaintenanceJSONDecodesWithItsDocumentedKeys() throws {
+        let json = """
+        {"generated_at":"2026-11-26T00:00:00Z","host":"h","devices":{},
+         "maintenance":{"thresholds":{"used_percent_at_or_above":80,"free_bytes_at_or_below":26843545600},
+           "history":[{"finished_at":"2026-11-26T01:00:00+00:00","mode":"run","status":"ran",
+                       "observed_free_delta_bytes":5,"removed_count":2,"candidate_count":3,"strategy_count":1}]}}
+        """
+        let reading = try JSONDecoder().decode(VPSStatusSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(reading.maintenance?.thresholds?.usedPercentAtOrAbove, 80)
+        XCTAssertEqual(reading.maintenance?.thresholds?.freeBytesAtOrBelow, 26_843_545_600)
+        XCTAssertNotNil(reading.maintenance?.history?.first?.finishedAtDate, "ISO with offset parses")
+        XCTAssertEqual(reading.maintenance?.history?.first?.observedFreeDeltaBytes, 5)
+    }
+
+    func testALegacyReclaimedBytesKeyStillShows() throws {
+        let json = """
+        {"generated_at":"2026-11-26T00:00:00Z","host":"h","devices":{},
+         "maintenance":{"thresholds":null,"history":[{"finished_at":"2026-11-26T01:00:00+00:00",
+           "mode":"run","status":"ran","reclaimed_bytes":4096,"removed_count":1,
+           "candidate_count":1,"strategy_count":1}]}}
+        """
+        let reading = try JSONDecoder().decode(VPSStatusSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(reading.maintenance?.history?.first?.observedFreeDeltaBytes, 4096)
+    }
+
+    func testMaintenanceWithoutHistoryKeepsTheWholeSnapshot() throws {
+        // A maintenance object with no history key must never discard the
+        // reading: an older or partial publisher still decodes.
+        let json = """
+        {"generated_at":"2026-11-26T00:00:00Z","host":"h","devices":{},
+         "maintenance":{"thresholds":{"used_percent_at_or_above":80,"free_bytes_at_or_below":100}}}
+        """
+        let reading = try JSONDecoder().decode(VPSStatusSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(reading.maintenance?.thresholds?.usedPercentAtOrAbove, 80)
+        XCTAssertNil(reading.maintenance?.history)
+        let status = build(reading: reading)
+        XCTAssertEqual(status.maintenance?.history?.count, 0, "an absent history becomes empty, not a lost reading")
     }
 
     func testAnUnreadableTimeOrAClockFarAheadIsNotCurrent() {

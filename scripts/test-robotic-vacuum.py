@@ -273,7 +273,9 @@ class TestNotifySuppression(unittest.TestCase):
                 os.environ.pop(alerts.NO_NOTIFY_ENV, None)
             else:
                 os.environ[alerts.NO_NOTIFY_ENV] = value
-            with patch.object(alerts.sys, "platform", "darwin"), patch("vacuum.alerts.subprocess.run") as run:
+            with patch.object(alerts.sys, "platform", "darwin"), \
+                 patch.object(alerts, "hog_hunter_running", return_value=False), \
+                 patch("vacuum.alerts.subprocess.run") as run:
                 real_notify_macos()("Hog Hunter", 'Say "hi"')
         return run
 
@@ -294,6 +296,48 @@ class TestNotifySuppression(unittest.TestCase):
         self.assertTrue(alerts.notifications_suppressed())
         with self.assertRaises(AssertionError):
             alerts.notify_macos("Hog Hunter", "not expected")
+
+
+class TestNotifyNeverLaunchesTheApp(unittest.TestCase):
+    """A banner must never open the app on the owner's screen.
+
+    `tell application "Hog Hunter" to display notification` launches the app
+    when it is not running, so the vacuum used to bring the Hog Hunter window
+    forward every time an alert fired.  With the app closed the banner goes
+    through Script Editor, which launches nothing.
+    """
+
+    def script(self, running: bool) -> str:
+        with patch.dict(os.environ):
+            # The suite runs with the notification switch on, so the banner
+            # would never be posted and this test would prove nothing.
+            os.environ.pop(alerts.NO_NOTIFY_ENV, None)
+            with patch.object(alerts.sys, "platform", "darwin"), \
+                 patch.object(alerts, "hog_hunter_running", return_value=running), \
+                 patch("vacuum.alerts.subprocess.run") as run:
+                real_notify_macos()("Hog Hunter", 'Say "hi"')
+        argv = run.call_args[0][0]
+        self.assertEqual(argv[:2], ["osascript", "-e"])
+        return argv[2]
+
+    def test_with_the_app_closed_the_banner_launches_nothing(self) -> None:
+        script = self.script(running=False)
+        self.assertNotIn("tell application", script)
+        self.assertIn('display notification "Say \\"hi\\""', script)
+
+    def test_with_the_app_running_the_banner_still_carries_its_name(self) -> None:
+        script = self.script(running=True)
+        self.assertIn('tell application "Hog Hunter"', script)
+        self.assertIn('display notification "Say \\"hi\\""', script)
+
+    def test_the_running_check_asks_for_the_app_by_its_process_name(self) -> None:
+        """The check has to match the executable, not the bundle id."""
+        with patch("vacuum.alerts.subprocess.run") as run:
+            run.return_value.returncode = 1
+            run.return_value.stdout = ""
+            self.assertFalse(alerts.hog_hunter_running())
+        argv = run.call_args[0][0]
+        self.assertEqual(argv[:3], ["pgrep", "-x", "HogHunter"])
 
 
 class TestAlertDecisionStillNotifies(_TempHomeCase):
@@ -348,6 +392,27 @@ class TestSteps(unittest.TestCase):
         cfg = load_config()
         ids = steps_for_trigger(cfg, "pressure", pressure=True)
         self.assertIn("grok_sessions", ids)
+
+
+class TestGuardLockTimeout(unittest.TestCase):
+    def test_guard_times_out_instead_of_hanging(self):
+        import fcntl as _fcntl
+
+        from vacuum.lock import _flock_with_timeout
+
+        with tempfile.TemporaryDirectory() as td:
+            fd = os.open(str(Path(td) / "guard"), os.O_RDWR | os.O_CREAT, 0o600)
+            peer = os.open(str(Path(td) / "guard"), os.O_RDWR)
+            try:
+                _fcntl.flock(peer, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                started = time.monotonic()
+                with self.assertRaises(TimeoutError):
+                    _flock_with_timeout(fd, timeout=0.2)
+                self.assertLess(time.monotonic() - started, 5)
+            finally:
+                _fcntl.flock(peer, _fcntl.LOCK_UN)
+                os.close(peer)
+                os.close(fd)
 
 
 class TestLockSkip(unittest.TestCase):
@@ -424,6 +489,44 @@ class TestLockSkip(unittest.TestCase):
         self.assertTrue(all(s.step_id == "janitor_worktree_retire" for s in record.steps))
 
 
+class TestPackageCachesGateOnTheirOwnInstalls(unittest.TestCase):
+    """npm/pnpm/yarn caches are read by their own installs, not by xcodebuild.
+    The build gate made these steps permanent no-ops on a host that builds
+    all day (live skips 2026-11-27: 'xcodebuild is running' on every tick)."""
+
+    def _run_step(self, step_id, install_running):
+        from vacuum.engine import StepStatus, VacuumEngine
+
+        cfg = load_config()
+        engine = VacuumEngine(cfg, Path("/tmp"))
+        with patch.object(sys, "platform", "darwin"), \
+                patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), \
+                patch.object(VacuumEngine, "_tool_command", return_value="/usr/bin/true"), \
+                patch.object(VacuumEngine, "_install_running", return_value=install_running), \
+                patch.object(VacuumEngine, "_build_running", return_value="xcodebuild is running"), \
+                patch.object(VacuumEngine, "_pgrep_f", return_value=True), \
+                patch("vacuum.engine.work.run_process") as run_proc:
+            _freed, reason, status = engine._dispatch(step_id, False, "cheap", {}, "normal", False)
+        return status, reason, run_proc
+
+    def test_a_build_alone_no_longer_skips_the_package_caches(self):
+        from vacuum.engine import StepStatus
+
+        for step_id in ("npm_cache", "pnpm_store", "yarn_cache"):
+            status, reason, run_proc = self._run_step(step_id, install_running=False)
+            self.assertEqual(status, StepStatus.RAN, (step_id, reason))
+            self.assertTrue(run_proc.called, step_id)
+
+    def test_the_own_install_gate_still_skips_the_package_caches(self):
+        from vacuum.engine import StepStatus
+
+        for step_id in ("npm_cache", "pnpm_store", "yarn_cache"):
+            status, reason, run_proc = self._run_step(step_id, install_running=True)
+            self.assertEqual(status, StepStatus.SKIPPED, (step_id, reason))
+            self.assertIn("install in progress", reason)
+            self.assertFalse(run_proc.called, step_id)
+
+
 class TestDryRun(unittest.TestCase):
     def test_destructive_step_skipped_in_dry_run(self):
         from unittest.mock import patch
@@ -480,9 +583,24 @@ class TestHealth(unittest.TestCase):
         self.assertEqual(status["disk"]["free_gb"], 5.9)
 
     def test_a_low_disk_reports_degraded_health(self):
-        status = self._status_with_disk(20.0)
+        """Below the pressure floor but above critical reads acute."""
+        status = self._status_with_disk(60.0)
         self.assertEqual(status["health"], "degraded")
         self.assertEqual(status["disk"]["health"], "acute")
+
+    def test_a_disk_below_the_owner_crit_floor_reports_critical(self):
+        """The owner's janitor floors call 45 GiB critical, so the live 40.23 GiB
+        reading (2026-11-27) must never render as ok/healthy again."""
+        status = self._status_with_disk(40.23)
+        self.assertEqual(status["health"], "critical")
+        self.assertEqual(status["disk"]["health"], "critical")
+
+    def test_between_pressure_and_low_floors_the_disk_reads_ok(self):
+        """90 GiB is below the 100 GiB reclaim trigger but above the 80 GiB
+        pressure floor: reclaiming, not an emergency."""
+        status = self._status_with_disk(90.0)
+        self.assertEqual(status["health"], "healthy")
+        self.assertEqual(status["disk"]["health"], "ok")
 
     def test_a_roomy_disk_leaves_health_alone(self):
         status = self._status_with_disk(120.0)
@@ -936,6 +1054,62 @@ class TestHogHunterReclaimStep(_EngineHome):
             freed, _reason, status = self.engine._janitor_cache_reclaim({"disk_free_gb": 12.0}, "normal", dry_run=False)
         self.assertEqual((freed, status), (69_000_000, StepStatus.RAN))
         self.assertIn("--budget-sec=600", run.call_args.args[0])
+        self.assertIn("--band=full", run.call_args.args[0], "12 GiB free is under the 80 GiB pressure floor")
+
+    def test_the_reclaim_band_follows_the_configured_pressure_floor(self):
+        """At or below the pressure floor the reclaim takes the full band; above
+        it (but below the low floor) it stays cheap.  The floors are the
+        owner's configured disk posture, so the band must drift with them."""
+        self.fake_cleaner()
+        for free, want in ((90.0, "--band=cheap"), (79.9, "--band=full"), (40.23, "--band=full")):
+            with patch("vacuum.engine._run_in_own_group", return_value=(0, _report(), "", False)) as run:
+                self.engine._janitor_cache_reclaim({"disk_free_gb": free}, "normal", dry_run=False)
+            self.assertIn(want, run.call_args.args[0], free)
+        self.cfg.setdefault("janitor", {})["pressure_free_gib"] = 20
+        engine = self.engine.__class__(self.cfg, home=self.home, disk_free=lambda: 0)
+        with patch("vacuum.engine._run_in_own_group", return_value=(0, _report(), "", False)) as run:
+            engine._janitor_cache_reclaim({"disk_free_gb": 40.23}, "normal", dry_run=False)
+        self.assertIn("--band=cheap", run.call_args.args[0], "a lowered floor moves the band with it")
+
+    def test_the_watch_fires_pressure_at_the_same_floors_the_status_reports(self):
+        """One resolver feeds the pressure trigger and the panel: at the
+        shipped floors a watch sample of 60 GB free is a pressure hit and
+        escalates.  Before, the trigger read only the resource_watch 25/15
+        defaults, so the panel called 60 GB acute while no pressure run
+        ever fired."""
+        from vacuum.engine import VacuumEngine
+
+        sample = {"disk_sample_ok": True, "sample_complete": True, "disk_free_gb": 60.0,
+                  "swap_used_pct": 0.0, "swap_used_gb": 0.0, "load1": 0.0}
+        runs = []
+
+        def fake_run(self, trigger, pressure=False, band="cheap", dry_run=False):
+            runs.append((trigger, band))
+            rec = RunRecord("p", trigger, started_at=time.time())
+            rec.finish()
+            return rec
+
+        with patch("vacuum.engine.sample_mac", return_value=sample), \
+                patch.object(VacuumEngine, "run", fake_run):
+            _record, hits, cleaned = self.engine.run_watch_tick({}, None)
+        self.assertTrue(any(h["metric"] == "disk_free_gb" for h in hits), hits)
+        self.assertTrue(cleaned)
+        self.assertIn((TriggerKind.PRESSURE, "full"), runs)
+
+    def test_the_watch_stays_quiet_above_the_floors(self):
+        from vacuum.engine import VacuumEngine
+
+        sample = {"disk_sample_ok": True, "sample_complete": True, "disk_free_gb": 90.0,
+                  "swap_used_pct": 0.0, "swap_used_gb": 0.0, "load1": 0.0}
+
+        def fake_run(self, trigger, pressure=False, band="cheap", dry_run=False):
+            raise AssertionError("no pressure run above the floors")
+
+        with patch("vacuum.engine.sample_mac", return_value=sample), \
+                patch.object(VacuumEngine, "run", fake_run):
+            _record, hits, cleaned = self.engine.run_watch_tick({}, None)
+        self.assertEqual(hits, [])
+        self.assertFalse(cleaned)
 
     def test_the_disk_reclaim_step_runs_even_under_extreme_load(self):
         """The load guard that opened this step is gone.  Skipping the disk reclaim
@@ -1682,6 +1856,23 @@ class TestHistoryRetention(unittest.TestCase):
     def test_the_fallback_matches_the_shipped_policy(self):
         policy = json.loads((REPO / "config" / "robotic-vacuum.json").read_text(encoding="utf-8"))
         self.assertEqual(policy["history_max_runs"], DEFAULT_HISTORY_MAX_RUNS)
+
+    def test_the_shipped_policy_carries_the_reclaim_floors(self):
+        """The floors the owner runs with are the floors the repo ships.
+
+        A live override under Application Support is per machine, and a fresh
+        clone or a reinstall of the policy drops it, so the shipped policy has
+        to hold the same numbers.  Otherwise the Mac goes quietly back to
+        waiting until the disk is nearly full before it reclaims anything.
+        """
+        policy = json.loads((REPO / "config" / "robotic-vacuum.json").read_text(encoding="utf-8"))
+        self.assertEqual(policy["janitor"]["low_free_gib"], 100)
+        self.assertEqual(policy["janitor"]["pressure_free_gib"], 80)
+        self.assertEqual(policy["janitor"]["crit_free_gib"], 45)
+        self.assertEqual(policy["lanes"]["retire_min_days"], 3)
+        self.assertEqual(policy["resource_watch"]["clean_cooldown_sec"], 1800)
+        self.assertEqual(policy["resource_watch"]["clean_cooldown_crit_sec"], 600)
+        self.assertEqual(policy["pm2_logs_cap_mb"], 50)
 
     def _store_source(self) -> str:
         """The Mac store's source, found by content rather than by filename.
@@ -3332,7 +3523,48 @@ class TestCadenceOccupancy(unittest.TestCase):
     def _messages(self, notify) -> list:
         return [call.args[1] for call in notify.call_args_list]
 
-    # MARK: - The alert layer
+    def test_the_full_cadence_reclaims_with_the_band_the_floors_call_for(self):
+        """The full cadence used to reclaim in the safe band no matter how low
+        the disk sat.  The band reads a sample taken this tick: at or below
+        the pressure floor the run takes the full band; above it, the safe
+        band.  A persisted figure never decides it -- it can be arbitrarily
+        old when the watch was not due or a df failed -- and a failed probe
+        keeps the safe band rather than act on an unmeasured disk."""
+        from vacuum.scheduler import run_scheduler_tick
+
+        cases = (
+            ({"disk_sample_ok": True, "disk_free_gb": 12.0}, 90.0, "full"),   # stale-high prev must not keep it cheap
+            ({"disk_sample_ok": True, "disk_free_gb": 79.9}, None, "full"),   # no persisted reading at all
+            ({"disk_sample_ok": True, "disk_free_gb": 60.0}, None, "full"),
+            ({"disk_sample_ok": True, "disk_free_gb": 90.0}, 12.0, "cheap"),  # stale-low prev must not force full
+            ({"disk_sample_ok": False, "disk_free_gb": 0.0}, 12.0, "cheap"),  # failed probe: never act on an unmeasured number
+        )
+        for sample, prev, want in cases:
+            with tempfile.TemporaryDirectory() as td:
+                store = self._store(td)
+                store.cfg.setdefault("janitor", {})["pressure_free_gib"] = 80
+                now = time.time()
+                store.touch_scheduler("last_watch", now)
+                store.touch_scheduler("last_janitor", now)
+                store.touch_scheduler("last_full", now - 20000)
+                if prev is not None:
+                    store.merge_scheduler_state({"prev_disk_free_gb": prev})
+                bands = {}
+
+                def fake_run(self, trigger, band="cheap", dry_run=False):
+                    bands[trigger] = band
+                    record = RunRecord(run_id="tick-1", trigger=trigger, started_at=now, ended_at=now)
+                    record.steps = [StepResult("housekeeper_lock", "Housekeeper lock", StepStatus.SKIPPED)]
+                    return record
+
+                full_sample = {"at": int(now), "sample_complete": True, "load1": 0.0,
+                               "swap_used_pct": 0.0, "swap_used_gb": 0.0, **sample}
+                with patch("vacuum.engine.VacuumEngine.run", fake_run):
+                    with patch("vacuum.scheduler.sample_mac", return_value=full_sample):
+                        with patch("vacuum.alerts.notify_macos"):
+                            with patch("vacuum.alerts.launchd_loaded", return_value=True):
+                                run_scheduler_tick(store, now=now)
+                self.assertEqual(bands.get(TriggerKind.FULL), want, (sample, prev))
 
     def test_a_cadence_another_cadence_occupied_is_not_reported_overdue(self):
         with tempfile.TemporaryDirectory() as td:

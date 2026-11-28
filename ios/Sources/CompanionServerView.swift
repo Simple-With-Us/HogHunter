@@ -277,18 +277,25 @@ struct ServerTabContent: View {
     /// again and changes nothing there.  Pull to refresh does the same.
     private var refreshSection: some View {
         Section {
-            Button {
-                Task { await model.refreshServer() }
-            } label: {
-                HStack {
-                    Label("Refresh Server Reading", systemImage: "arrow.clockwise")
-                    Spacer()
-                    if model.isRefreshingServer {
-                        ProgressView()
+            TimelineView(.periodic(from: Date(), by: 1)) { context in
+                Button {
+                    Task { await model.refreshServer() }
+                } label: {
+                    HStack {
+                        Label("Refresh Server Reading", systemImage: "arrow.clockwise")
+                        Spacer()
+                        if model.isRefreshingServer {
+                            ProgressView()
+                        }
                     }
                 }
+                .disabled(model.isRefreshingServer || !model.controlsReachable || model.serverRefreshRetryRemaining(now: context.date) > 0)
+                if let countdown = CompanionFreshness.countdownText(remainingSeconds: model.serverRefreshRetryRemaining(now: context.date)) {
+                    Label(countdown, systemImage: "clock")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
-            .disabled(model.isRefreshingServer || !model.controlsReachable)
             if let note = model.serverRefreshNote {
                 Text(note)
                     .font(.footnote)
@@ -750,6 +757,63 @@ private struct MeterRow: View {
     }
 }
 
+/// The server on the Overview tab, beside the Mac: its CPU, memory and disk
+/// with bars, and its busiest processes.  Read-only; the Server tab owns
+/// every control.  It draws only when the phone may see the server and the
+/// reading has numbers; any other state keeps the one-line strip.
+struct ServerOverviewSummary: View {
+    let server: CompanionServerStatus
+
+    /// True when the reading has a number to draw, so the Overview never
+    /// shows a section of dashes.
+    static func hasNumbers(_ server: CompanionServerStatus) -> Bool {
+        server.cpu != nil || server.memory != nil || server.devices?.isEmpty == false || server.processes?.isEmpty == false
+    }
+    let openServerTab: () -> Void
+
+    var body: some View {
+        Section {
+            if server.resolvedState() == .stale {
+                Text("This reading is stale.\u{00A0} The numbers are what the Mac last saw \(ServerFormat.age(server.generatedAt)).")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            if server.cpu != nil {
+                MeterRow(title: "CPU", value: server.cpu?.percentText, percent: server.cpu?.percent, severity: server.cpu?.severity, detail: cpuDetail)
+            }
+            if server.memory != nil {
+                MeterRow(title: "Memory", value: server.memory?.percentText, percent: server.memory?.percent, severity: server.memory?.severity, detail: server.memory?.detail)
+            }
+            if let disk = server.devices?.first {
+                MeterRow(title: disk.title, value: disk.usedText, percent: disk.usedPercent, severity: disk.severity, detail: nil)
+            }
+            ForEach(Array((server.processes ?? []).prefix(3))) { process in
+                HStack {
+                    Text(process.name)
+                        .font(.subheadline)
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    Text(process.cpuText ?? ServerFormat.dash)
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                    Text(process.memoryText ?? ServerFormat.dash)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 56, alignment: .trailing)
+                }
+            }
+            Button("Open Server tab", action: openServerTab)
+                .font(.caption.weight(.medium))
+        } header: {
+            Text("Server")
+        }
+    }
+
+    private var cpuDetail: String {
+        let cores = server.cpu?.cores.map { "\($0) cores" } ?? "\(ServerFormat.dash) cores"
+        return "\(cores) · 1m load \(server.cpu?.loadText ?? ServerFormat.dash)"
+    }
+}
+
 // MARK: - Server Controls
 
 /// One finished server action, for the result sheet.
@@ -1032,7 +1096,8 @@ private struct ServerMaintenanceSection: View {
     private var chosenTitles: String { chosen.map(ServerActionOutcome.strategyTitle).joined(separator: ", ") }
 
     var body: some View {
-        if snapshot.remoteServerControlAllowed == true {
+        Group {
+            if snapshot.remoteServerControlAllowed == true {
             Section {
                 ForEach(CompanionServerControl.strategies, id: \.self) { strategy in
                     Toggle(ServerActionOutcome.strategyTitle(strategy), isOn: Binding(
@@ -1080,7 +1145,57 @@ private struct ServerMaintenanceSection: View {
             } footer: {
                 Text("Only age-qualified, unused items are eligible.\u{00A0} Containers, volumes and active logs are protected.")
             }
+            }
         }
+        serverHistory
+    }
+
+    /// The server's own record, matching the Mac's Maintenance tab: the gate
+    /// its scheduled run uses and the last finished runs.  Counts and
+    /// measured bytes only.
+    @ViewBuilder private var serverHistory: some View {
+        if let maintenance = snapshot.server?.maintenance {
+            Section {
+                if let percent = maintenance.thresholdUsedPercent, let free = maintenance.thresholdFreeBytes {
+                    Text("The server's own schedule wakes at \(Int(percent))% used or \(Self.bytes(free)) free.")
+                        .foregroundStyle(.secondary)
+                }
+                let runs = maintenance.history ?? []
+                if runs.isEmpty {
+                    Text("No finished server maintenance runs yet.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(runs.prefix(5).enumerated()), id: \.offset) { _, run in
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(run.finishedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Time unknown")
+                            Spacer()
+                            Text(Self.detail(run))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } header: {
+                Text("Recent Server Runs")
+            } footer: {
+                Text("The server records its own scheduled and manual maintenance.\u{00A0} Times follow this phone's clock.")
+            }
+        }
+    }
+
+    private static func bytes(_ value: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: max(0, value), countStyle: .memory)
+    }
+
+    private static func detail(_ run: CompanionServerMaintenanceRun) -> String {
+        let mode = run.mode == "scheduled" ? "Scheduled" : "Run"
+        var parts = [mode, run.status.map { $0.prefix(1).uppercased() + $0.dropFirst() } ?? "Status unknown"]
+        if let delta = run.observedFreeDeltaBytes {
+            if delta > 0 { parts.append("\(bytes(delta)) freed") }
+            else if delta < 0 { parts.append("space shrank") }
+        }
+        if let removed = run.removedCount, removed > 0 { parts.append("\(removed) removed") }
+        else if let candidates = run.candidateCount, candidates > 0 { parts.append("\(candidates) eligible") }
+        return parts.joined(separator: " · ")
     }
 
     private func run(acknowledged: Bool) {

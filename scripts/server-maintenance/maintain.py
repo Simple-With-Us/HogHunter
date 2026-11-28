@@ -22,6 +22,25 @@ DOCKER = ["/usr/bin/docker", "--host", "unix:///var/run/docker.sock"]
 BUILD = DOCKER + ["buildx", "--builder", "default"]
 AGE = 7 * 86400
 LIMIT = 1000
+# The pressure gate the scheduled run and fleet-extra share, reported to the
+# UI so the Mac card and the phone can say when a scheduled run would wake.
+PRESSURE_USED_PERCENT = 80.0
+PRESSURE_FREE_BYTES = 25 * 1024**3
+SIZE_RE = re.compile(r"^(\d+(?:\.\d+)?)([kKMGTP]?B)$")
+SIZE_MULTIPLIER = {"B": 1, "kB": 1000, "KB": 1000, "MB": 1000**2,
+                   "GB": 1000**3, "TB": 1000**4, "PB": 1000**5}
+def size_text_bytes(text):
+    """A buildx `Size` string ("1.234GB") in bytes, or None when it is not one.
+    Strict on purpose: an unrecognised unit is reported as unknown, never guessed."""
+    if not isinstance(text, str):
+        return None
+    m = SIZE_RE.fullmatch(text.strip())
+    if not m:
+        return None
+    mult = SIZE_MULTIPLIER.get(m.group(2))
+    if mult is None:
+        return None
+    return int(round(float(m.group(1)) * mult))
 
 
 class StopWork(Exception):
@@ -57,6 +76,24 @@ class Maintenance:
     def measure_disk(self):
         s = os.statvfs(self.root)
         return {"free_bytes": s.f_bavail * s.f_frsize, "total_bytes": s.f_blocks * s.f_frsize,
+                "used_percent": round(100 * (s.f_blocks - s.f_bfree) / s.f_blocks, 2)}
+
+    def measure_fleet_extra(self):
+        """Fleet-extra mount usage, or None when it is not mounted.
+
+        The volume that fills (lanes, scratch, runtime data) is not the
+        root filesystem this tool historically gated on, so a root-only
+        reading left the fullest disk unmeasured and uncleaned.
+        """
+        mount = self.path("/mnt/fleet-extra")
+        try:
+            if not os.path.ismount(mount):
+                return None
+            s = os.statvfs(mount)
+        except OSError:
+            return None
+        return {"mount": "/mnt/fleet-extra",
+                "free_bytes": s.f_bavail * s.f_frsize, "total_bytes": s.f_blocks * s.f_frsize,
                 "used_percent": round(100 * (s.f_blocks - s.f_bfree) / s.f_blocks, 2)}
 
     def command(self, argv):
@@ -192,6 +229,7 @@ class Maintenance:
 
     def docker_candidates(self, strategy):
         # Do not traverse Docker storage or any volume.  Respect parent keep markers.
+        self.build_cache_sizes = {}
         if self.protected(self.path("/var/lib/docker")):
             return []
         if strategy == "docker-images":
@@ -202,10 +240,13 @@ class Maintenance:
             if len(ids) > 100:
                 raise StopWork("image inventory limit")
             result = []
+            self.image_sizes = {}
             for image in ids:
                 self.check()
-                if self.image_eligible(image):
+                eligible, size = self.image_eligible(image)
+                if eligible:
                     result.append(image)
+                    self.image_sizes[image] = size
             return result
         self.verify_local_builder()
         code, out = self.runner(BUILD + ["du", "--format=json"])
@@ -226,7 +267,32 @@ class Maintenance:
                     and record.get("Shared") is False and record.get("Type") == "regular"
                     and self.clock() - self.timestamp(record.get("LastUsedAt")) >= AGE):
                 result.append(identity)
+                parsed = size_text_bytes(record.get("Size"))
+                self.build_cache_sizes[identity] = parsed
         return result[:20]
+
+    def candidate_bytes(self, strategy, candidates):
+        """Exact reclaimable bytes for a strategy's candidates, or None when
+        the inventory cannot state them.  File sizes come from the same
+        directory listing; image sizes from one inspect of the exact
+        identities; build-cache sizes are only reported when every candidate
+        carried a parseable buildx Size."""
+        if strategy in STRATEGIES[:2]:
+            return sum(int(s.st_size) for _, s in candidates)
+        if strategy == "docker-images":
+            known = getattr(self, "image_sizes", {})
+            values = [known.get(identity) for identity in candidates]
+            if any(value is None for value in values):
+                return None
+            return sum(values)
+        known = getattr(self, "build_cache_sizes", {})
+        sizes = {}
+        for identity in candidates:
+            value = known.get(identity)
+            if value is None:
+                return None
+            sizes[identity] = value
+        return sum(sizes.values())
 
     def image_eligible(self, identity):
         """Inspect only one exact image using one selected-field JSON object."""
@@ -234,19 +300,21 @@ class Maintenance:
         if not isinstance(identity, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", identity):
             raise ValueError("malformed image identity")
         code, data = self.runner(DOCKER + ["image", "inspect", "--format",
-            '{"created":{{json .Created}},"tags":{{json .RepoTags}},"labels":{{json .Config.Labels}}}', identity])
+            '{"created":{{json .Created}},"tags":{{json .RepoTags}},"labels":{{json .Config.Labels}},"size":{{json .Size}}}', identity])
         if code:
             raise ValueError("image changed during inventory")
         record = json.loads(data)
-        if not isinstance(record, dict) or set(record) != {"created", "tags", "labels"}:
+        if not isinstance(record, dict) or set(record) != {"created", "tags", "labels", "size"}:
             raise ValueError("malformed image metadata")
-        tags, labels = record["tags"], record["labels"]
+        tags, labels, size = record["tags"], record["labels"], record["size"]
         if ((labels is not None and not isinstance(labels, dict))
-                or (tags is not None and (not isinstance(tags, list) or any(not isinstance(t, str) for t in tags)))):
-            raise ValueError("malformed image tags or labels")
-        return (tags in (None, [])
+                or (tags is not None and (not isinstance(tags, list) or any(not isinstance(t, str) for t in tags)))
+                or (size is not None and (not isinstance(size, int) or isinstance(size, bool) or size < 0))):
+            raise ValueError("malformed image tags, labels or size")
+        eligible = (tags in (None, [])
                 and not any(str(k).casefold() in ("janitor-keep", "hoghunter.keep") for k in (labels or {}))
                 and self.clock() - self.timestamp(record["created"]) >= AGE)
+        return eligible, size
 
     def remove_files(self, strategy, candidates, progress=None):
         directory = self.path("/var/cache/apt/archives" if strategy == "package-cache" else "/var/log/fleet-backup")
@@ -427,7 +495,9 @@ class Maintenance:
                   "status": "skipped", "reason": "no eligible work", "dry_run": dry_run,
                   "before": before, "after": before, "reclaimed_bytes": 0, "observed_free_delta_bytes": 0, "removed_file_bytes": 0, "candidate_count": 0,
                   "strategies": [], "lock": {"path": "/run/fleet-housekeeper.lock", "acquired": False},
-                  "cancellation": {"requested": False}, "duration_seconds": 0}
+                  "cancellation": {"requested": False}, "duration_seconds": 0,
+                  "thresholds": {"used_percent_at_or_above": PRESSURE_USED_PERCENT,
+                                 "free_bytes_at_or_below": PRESSURE_FREE_BYTES}}
         held = False
         lock_inode = None
         requested_strategies = ()
@@ -440,12 +510,21 @@ class Maintenance:
                     or type(manual) is not bool or (manual and mode == "scheduled")):
                 raise ValueError("unknown mode or strategy")
             requested_strategies = tuple(strategies)
+            result["started_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
             if manual:
                 result["manual"] = True
             mutating = mode in ("run", "scheduled") and not dry_run
             if mode == "run" and not confirm and not dry_run:
                 raise ValueError("explicit run requires --confirm")
-            pressure = before["used_percent"] >= 80 or before["free_bytes"] < 25 * 1024**3
+            pressure = (before["used_percent"] >= PRESSURE_USED_PERCENT
+                        or before["free_bytes"] < PRESSURE_FREE_BYTES)
+            extra = self.measure_fleet_extra()
+            if extra is not None:
+                extra_pressure = (extra["used_percent"] >= PRESSURE_USED_PERCENT
+                                  or extra["free_bytes"] < PRESSURE_FREE_BYTES)
+                result["fleet_extra"] = extra
+                result["fleet_extra_pressure"] = extra_pressure
+                pressure = pressure or extra_pressure
             result["pressure"] = pressure
             if not pressure and not manual:
                 healthy_skip = True
@@ -476,6 +555,9 @@ class Maintenance:
                     item["candidate_count"] = len(candidates)
                     item["inventory_complete"] = True
                     result["candidate_count"] += len(candidates)
+                    sizes = self.candidate_bytes(strategy, candidates)
+                    if sizes is not None:
+                        item["reclaimable_bytes"] = sizes
                     if not candidates:
                         continue
                     if not mutating:
@@ -490,7 +572,7 @@ class Maintenance:
                             # Exact reviewed identities only; never force image removal, containers or volumes.
                             if self.protected(self.path("/var/lib/docker")):
                                 raise ValueError("Docker storage became protected")
-                            if strategy == "docker-images" and not self.image_eligible(identity):
+                            if strategy == "docker-images" and not self.image_eligible(identity)[0]:
                                 continue
                             if strategy == "docker-build-cache":
                                 self.verify_local_builder()
@@ -545,6 +627,12 @@ class Maintenance:
                 result["after"] = self.disk()
                 result["observed_free_delta_bytes"] = result["after"]["free_bytes"] - before["free_bytes"]
                 result["removed_file_bytes"] = self.removed_file_bytes
+                if "fleet_extra" in result:
+                    extra_after = self.measure_fleet_extra()
+                    if extra_after is not None:
+                        result["fleet_extra_after"] = extra_after
+                        result["fleet_extra_observed_free_delta_bytes"] = (
+                            extra_after["free_bytes"] - result["fleet_extra"]["free_bytes"])
             except OSError:
                 result.update(status="partial", reason="final disk measurement unavailable")
             result["duration_seconds"] = round(self.monotonic() - started, 3)
@@ -560,6 +648,11 @@ class Maintenance:
                         "reason": "not attempted; run ended before strategy inventory"})
                 if missing and result["status"] in ("ran", "skipped", "planned"):
                     result["status"] = "partial"
+            result["finished_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+            known = [item.get("reclaimable_bytes") for item in result["strategies"]]
+            if result["strategies"]:
+                result["reclaimable_bytes"] = sum(k for k in known if k is not None)
+                result["reclaimable_complete"] = all(k is not None for k in known)
             if held:
                 try:
                     self.audit(dict(result, event="finished"))

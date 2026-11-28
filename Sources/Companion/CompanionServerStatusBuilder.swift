@@ -88,7 +88,27 @@ enum CompanionServerStatusBuilder {
             tools: snapshot.toolStatuses?.map(tool),
             processes: processes?.prefix(processLimit).map(process),
             processCount: processes?.count,
-            workloads: snapshot.coolify?.prefix(workloadLimit).map(workload)
+            workloads: snapshot.coolify?.prefix(workloadLimit).map(workload),
+            maintenance: snapshot.maintenance.map(maintenance)
+        )
+    }
+
+    /// The server's maintenance record, bounded exactly like the server's
+    /// own history so the phone and the Mac agree on what ended when.
+    static func maintenance(_ value: VPSMaintenance) -> CompanionServerMaintenance {
+        CompanionServerMaintenance(
+            thresholdUsedPercent: value.thresholds?.usedPercentAtOrAbove,
+            thresholdFreeBytes: value.thresholds?.freeBytesAtOrBelow,
+            history: (value.history ?? []).prefix(CompanionServerMaintenance.historyLimit).map { run in
+                CompanionServerMaintenanceRun(
+                    finishedAt: run.finishedAtDate,
+                    mode: run.mode,
+                    status: run.status,
+                    observedFreeDeltaBytes: run.observedFreeDeltaBytes,
+                    removedCount: run.removedCount,
+                    candidateCount: run.candidateCount
+                )
+            }
         )
     }
 
@@ -344,9 +364,19 @@ enum CompanionServerStatusBuilder {
             cpuText: nonNegative(process.cpuPercent).map { String(format: "%.0f%%", $0) },
             memoryText: process.memoryBytes.flatMap { $0 >= 0 ? size($0) : nil },
             swapText: process.swapBytes.flatMap { $0 >= 0 ? size($0) : nil },
-            isTamed: process.nice == nil ? nil : process.isTamed,
+            isTamed: process.phoneIsTamed,
             protectionReason: process.protectionReason?.isEmpty == false ? process.protectionReason : nil,
-            actions: CompanionServerControl.processActions.filter { process.can(action: CompanionServerActions.macAction(forProcess: $0)) }
+            actions: CompanionServerControl.processActions.filter { action in
+                guard process.can(action: CompanionServerActions.macAction(forProcess: action)) else { return false }
+                // The phone renders one label per action it is offered: a
+                // tamed process offers only the restore, an untamed one only
+                // the tame, and an unknown priority offers both rather than
+                // guessing.  The Mac's menu applies the same rule.
+                switch (action, process.tameState) {
+                case ("tame", .tamed), ("untame", .untamed): return false
+                default: return true
+                }
+            }
         )
     }
 

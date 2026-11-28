@@ -260,7 +260,7 @@ class Sandbox:
             "anomalies": [],
             "summary": {},
             "cleaner_candidates": [r["realpath"] for r in rows] if candidates is None else list(candidates),
-            "cleaner_min_days": 7,
+            "cleaner_min_days": 3,
         }
         rep.update(top)
         return rep
@@ -633,7 +633,7 @@ class TestReportGates(unittest.TestCase):
 
 
 class TestSettings(unittest.TestCase):
-    CONSTANTS = (900.0, 420.0, 2, 7.0, 24.0)
+    CONSTANTS = (900.0, 420.0, 2, 3.0, 24.0)
 
     @staticmethod
     def limits(settings) -> tuple:
@@ -666,10 +666,10 @@ class TestSettings(unittest.TestCase):
         cfg = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"))
         self.assertEqual(self.limits(lanes.lane_settings(cfg, Path("/h"), env={})), self.CONSTANTS)
 
-    def test_retention_config_is_bounded_and_invalid_values_default_to_seven(self) -> None:
+    def test_retention_config_is_bounded_and_invalid_values_default_to_three(self) -> None:
         for value, expected in (
-            (1, 1.0), (3, 3.0), (3.0, 3.0), (90, 90.0),
-            (0, 7.0), (91, 7.0), (3.5, 7.0), (True, 7.0), ("bad", 7.0),
+            (1, 1.0), (5, 5.0), (5.0, 5.0), (90, 90.0),
+            (0, 3.0), (91, 3.0), (3.5, 3.0), (True, 3.0), ("bad", 3.0),
         ):
             settings = lanes.lane_settings({"lanes": {"retire_min_days": value}}, Path("/h"), env={})
             self.assertEqual(settings.retire_min_days, expected, value)
@@ -685,7 +685,7 @@ class TestSettings(unittest.TestCase):
                 self.assertEqual(lanes.lane_settings(cfg, Path("/h"), env={}).retire_min_days, expected, (key, value))
             for value in ("03", " 3 ", "²", "³", "٣", "3.0", "9" * 5000):
                 cfg = load_config(path=Path("/nonexistent/config.json"), home=Path("/h"), env={key: value})
-                self.assertEqual(lanes.lane_settings(cfg, Path("/h"), env={}).retire_min_days, 7.0, (key, value[:16]))
+                self.assertEqual(lanes.lane_settings(cfg, Path("/h"), env={}).retire_min_days, 3.0, (key, value[:16]))
 
     def test_retention_config_uses_canonical_strings_and_accepts_integral_json_numbers(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hh-retire-config-") as temp:
@@ -693,7 +693,7 @@ class TestSettings(unittest.TestCase):
             for value in ("03", " 3 ", "²", "³", "٣", "3.0", "9" * 5000):
                 path.write_text(json.dumps({"lanes": {"retire_min_days": value}}), encoding="utf-8")
                 cfg = load_config(path=path, home=Path(temp), env={})
-                self.assertEqual(lanes.lane_settings(cfg, Path(temp), env={}).retire_min_days, 7.0, value[:16])
+                self.assertEqual(lanes.lane_settings(cfg, Path(temp), env={}).retire_min_days, 3.0, value[:16])
             for value in (1, 3, 3.0, 90):
                 path.write_text(json.dumps({"lanes": {"retire_min_days": value}}), encoding="utf-8")
                 cfg = load_config(path=path, home=Path(temp), env={})
@@ -701,9 +701,9 @@ class TestSettings(unittest.TestCase):
 
     def test_nondefault_retention_is_passed_to_doctor_without_changing_default_argv(self) -> None:
         sb = Sandbox(self)
-        settings = sb.settings(retire_min_days=3)
+        settings = sb.settings(retire_min_days=5)
         seen = []
-        payload = sb.report([], cleaner_min_days=3)
+        payload = sb.report([], cleaner_min_days=5)
 
         def run(argv, timeout):
             seen.append(list(argv))
@@ -711,16 +711,16 @@ class TestSettings(unittest.TestCase):
 
         report = lanes.load_report(settings, sb.home, doctor_runner=run)
         self.assertTrue(report.ok, report.reason)
-        self.assertEqual(seen[0], [*settings.command, "--cleaner-retention-days", "3"])
+        self.assertEqual(seen[0], [*settings.command, "--cleaner-retention-days", "5"])
 
-        matching_cfg = sb.cfg(retire_min_days=3)
-        matching_cfg["lanes"]["doctor_command"] = [*settings.command, "--cleaner-retention-days", "3"]
+        matching_cfg = sb.cfg(retire_min_days=5)
+        matching_cfg["lanes"]["doctor_command"] = [*settings.command, "--cleaner-retention-days", "5"]
         matching = lanes.lane_settings(matching_cfg, sb.home, env={})
         report = lanes.load_report(matching, sb.home, doctor_runner=run)
         self.assertTrue(report.ok, report.reason)
         self.assertEqual(seen[1], list(matching.command), "an exact command-line value is not duplicated")
 
-        conflicting_cfg = sb.cfg(retire_min_days=3)
+        conflicting_cfg = sb.cfg(retire_min_days=5)
         conflicting_cfg["lanes"]["doctor_command"] = [*settings.command, "--cleaner-retention-days", "4"]
         conflicting = lanes.lane_settings(conflicting_cfg, sb.home, env={})
         refused = lanes.load_report(conflicting, sb.home, doctor_runner=run)
@@ -730,10 +730,10 @@ class TestSettings(unittest.TestCase):
 
     def test_report_retention_metadata_must_match_and_old_default_report_still_loads(self) -> None:
         sb = Sandbox(self)
-        settings = sb.settings(retire_min_days=3)
+        settings = sb.settings(retire_min_days=5)
         mismatched = lanes.validate_report(sb.report([], cleaner_min_days=7), settings, sb.home)
         self.assertFalse(mismatched.ok)
-        self.assertIn("expected 3", mismatched.reason)
+        self.assertIn("expected 5", mismatched.reason)
 
         missing = sb.report([])
         del missing["cleaner_min_days"]
@@ -745,7 +745,7 @@ class TestSettings(unittest.TestCase):
 
     def test_cached_report_with_a_different_retention_floor_is_rejected(self) -> None:
         sb = Sandbox(self)
-        settings = sb.settings(retire_min_days=3)
+        settings = sb.settings(retire_min_days=5)
         cache = sb.root / "cache" / "lane-doctor-report.json"
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(json.dumps(sb.report([], cleaner_min_days=7)), encoding="utf-8")
@@ -858,7 +858,7 @@ class TestSettings(unittest.TestCase):
                 path=Path("/nonexistent/config.json"), home=Path("/h"),
                 env={"hoghunter.maintain.janitor.retireMinDays": invalid},
             )
-            self.assertEqual(lanes.lane_settings(cfg_invalid, Path("/h"), env={}).retire_min_days, 7.0, invalid)
+            self.assertEqual(lanes.lane_settings(cfg_invalid, Path("/h"), env={}).retire_min_days, 3.0, invalid)
 
 
 # --------------------------------------------------------------------------- the Vacuum's own re-check
@@ -1121,8 +1121,8 @@ class TestRecheck(unittest.TestCase):
             ({"pr_state": "OPEN"}, "no merged-PR evidence"),
             ({"pr_state": "NONE"}, "no merged-PR evidence"),
             ({"pr_state": "BEYOND-MERGED"}, "no merged-PR evidence"),
-            ({"idle_days": 3.0}, "idle_days"),
-            ({"lane_age_days": 3.0}, "lane_age_days"),
+            ({"idle_days": 1.0}, "idle_days"),
+            ({"lane_age_days": 1.0}, "lane_age_days"),
             ({"idle_days": None}, "idle_days"),
             ({"read_errors": ["status: timeout"]}, "could not read"),
             ({"tool_cache": True}, "tool cache"),
@@ -2039,12 +2039,20 @@ class TestLegacyFullSteps(unittest.TestCase):
         self.assertEqual((status, reason), (StepStatus.SKIPPED, "node-gyp build in progress"))
         ran.assert_not_called()
 
-    def test_package_caches_wait_for_a_build(self) -> None:
+    def test_package_caches_run_during_a_build_but_not_during_their_own_install(self) -> None:
+        """A build does not read the npm/pnpm/yarn caches; the install gates do
+        the protecting.  The build gate made the steps permanent no-ops on a
+        host that builds all day (live skips 2026-11-27)."""
         engine = self.engine(OnlyMatching("xcodebuild"))
         with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.work.run_process") as ran:
             for step in (engine._npm_cache, engine._pnpm_store, engine._yarn_cache):
                 _freed, reason, status = step()
-                self.assertEqual((status, reason), (StepStatus.SKIPPED, "skipped: xcodebuild is running"))
+                self.assertEqual(status, StepStatus.RAN, (step, reason))
+        self.assertEqual(ran.call_count, 3)
+        engine = self.engine(OnlyMatching("npm (install"))
+        with patch("vacuum.engine.shutil.which", return_value="/usr/bin/true"), patch("vacuum.engine.work.run_process") as ran:
+            _freed, reason, status = engine._npm_cache()
+            self.assertEqual((status, reason), (StepStatus.SKIPPED, "npm install in progress"))
         ran.assert_not_called()
 
     def test_npx_folder_is_kept_while_a_process_runs_from_it(self) -> None:

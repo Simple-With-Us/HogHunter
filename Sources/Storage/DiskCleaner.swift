@@ -1506,15 +1506,35 @@ final class DiskCleaner: @unchecked Sendable {
         if scanShouldStop() { return items.sorted { $0.bytes > $1.bytes } }
 
         // CrashReporter
+        //
+        // Children, never the folder itself:  the category's safety rule
+        // allows `Application Support/CrashReporter/*` and refuses
+        // `Application Support/CrashReporter`, so an item for the folder
+        // could never be cleaned -- it surfaced only as a safety error in
+        // every run's record.  The OS recreates whatever it still needs.
         let crashReportsURL = userHomeURL.appendingPathComponent("Library/Application Support/CrashReporter", isDirectory: true)
-        if scanFileExists(atPath: crashReportsURL.path) {
-            let stats = directoryStats(at: crashReportsURL)
-            if stats.bytes > 0 {
+        if scanFileExists(atPath: crashReportsURL.path),
+           let contents = try? scanContentsOfDirectory(at: crashReportsURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+            // Preserve the former root walk's cap across all child measurements.
+            let budget = DirectoryTraversalBudget(deadline: scanUptime() + (Self.scanContext?.depth.targetDuration ?? 0.15), remaining: 25_000)
+            for url in contents {
+                if scanShouldStop() { break }
+                guard budget.remaining > 0, scanUptime() < budget.deadline else {
+                    markScanIncomplete()
+                    break
+                }
+                // Inspect the entry itself before directoryStats can resolve or
+                // enumerate its destination. CrashReporter links are review-only.
+                guard let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]),
+                      values.isSymbolicLink != true else { continue }
+                budget.remaining -= 1
+                let stats = directoryStats(at: url, traversalBudget: budget)
+                guard stats.bytes > 0 else { continue }
                 items.append(CleanItem(
                     category: .logsAndDiagnostics,
-                    title: "Crash Reporter Logs",
-                    subtitle: "~/Library/Application Support/CrashReporter",
-                    url: crashReportsURL,
+                    title: url.lastPathComponent,
+                    subtitle: url.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"),
+                    url: url,
                     bytes: stats.bytes,
                     fileCount: stats.fileCount,
                     isApproximate: stats.isApproximate,
@@ -1923,6 +1943,11 @@ final class DiskCleaner: @unchecked Sendable {
         if Self.scanContext == nil { return withScanBudget { scanAIArtifacts() } }
         var items: [CleanItem] = []
         let sevenDaysAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+        // The MiniMax Code runtime keeps a session's messages, snapshots and
+        // workspace tree forever, and it is the largest single writer on this
+        // Mac.  Two weeks is long enough that a session nobody reopened is
+        // history rather than work in progress.
+        let fourteenDaysAgo = Calendar.current.date(byAdding: .day, value: -14, to: Date()) ?? Date()
 
         // 1. Antigravity brain sessions (~/.gemini/antigravity/brain)
         let brainURL = userHomeURL.appendingPathComponent(".gemini/antigravity/brain", isDirectory: true)
@@ -2092,6 +2117,85 @@ final class DiskCleaner: @unchecked Sendable {
                             detail: "Rotated agent transcript log dump"
                         ))
                     }
+                }
+            }
+        }
+
+        // 7. Stale MiniMax Code runtime state (~/.minimax/v2)
+        // Session days and workspace trees the runtime has not touched for a
+        // fortnight.  A live session keeps writing inside its own folder, so
+        // the age gate is the safety, not a guess about which seat is busy.
+        if !scanShouldStop() {
+            let minimaxRoot = userHomeURL.appendingPathComponent(".minimax/v2", isDirectory: true)
+            let sessionsRoot = minimaxRoot.appendingPathComponent("sessions", isDirectory: true)
+            if let years = try? scanContentsOfDirectory(at: sessionsRoot, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
+                for yearURL in years {
+                    if scanShouldStop() { break }
+                    guard (try? yearURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+                    if let months = try? scanContentsOfDirectory(at: yearURL, includingPropertiesForKeys: [.isDirectoryKey], options: []) {
+                        for monthURL in months {
+                            if scanShouldStop() { break }
+                            guard (try? monthURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+                            if let days = try? scanContentsOfDirectory(at: monthURL, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: []) {
+                                for dayURL in days {
+                                    if scanShouldStop() { break }
+                                    guard let values = try? dayURL.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey]),
+                                          values.isDirectory == true,
+                                          let modDate = values.contentModificationDate,
+                                          modDate < fourteenDaysAgo else { continue }
+                                    let stats = directoryStats(at: dayURL)
+                                    guard !stats.isApproximate, stats.bytes > 0 else { continue }
+                                    // The folder's own stamp only moves when a direct
+                                    // child is added or removed; a live session
+                                    // appending to its files leaves it untouched.
+                                    // The measured recursive newest write is the
+                                    // age that proves the tree quiet.
+                                    let lastActivity = max(modDate, stats.lastModified ?? modDate)
+                                    guard lastActivity < fourteenDaysAgo else { continue }
+                                    items.append(CleanItem(
+                                        category: .aiArtifacts,
+                                        title: "MiniMax Session Day (\(dayURL.lastPathComponent))",
+                                        subtitle: "~/.minimax/v2/sessions/\(yearURL.lastPathComponent)/\(monthURL.lastPathComponent)/\(dayURL.lastPathComponent)",
+                                        url: dayURL,
+                                        bytes: stats.bytes,
+                                        fileCount: stats.fileCount,
+                                        isApproximate: stats.isApproximate,
+                                        lastModified: lastActivity,
+                                        isSelected: false,
+                                        detail: "MiniMax Code session day older than 14 days"
+                                    ))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let workspacesRoot = minimaxRoot.appendingPathComponent("workspaces", isDirectory: true)
+            if let workspaces = try? scanContentsOfDirectory(at: workspacesRoot, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: []) {
+                for workspaceURL in workspaces {
+                    if scanShouldStop() { break }
+                    guard let values = try? workspaceURL.resourceValues(forKeys: [.contentModificationDateKey, .isDirectoryKey]),
+                          values.isDirectory == true,
+                          let modDate = values.contentModificationDate,
+                          modDate < fourteenDaysAgo else { continue }
+                    let stats = directoryStats(at: workspaceURL)
+                    guard !stats.isApproximate, stats.bytes > 0 else { continue }
+                    // Same age proof as the session days above: the recursive
+                    // newest write, not the folder's own stamp.
+                    let lastActivity = max(modDate, stats.lastModified ?? modDate)
+                    guard lastActivity < fourteenDaysAgo else { continue }
+                    items.append(CleanItem(
+                        category: .aiArtifacts,
+                        title: "MiniMax Workspace (\(workspaceURL.lastPathComponent.prefix(8)))",
+                        subtitle: "~/.minimax/v2/workspaces/\(workspaceURL.lastPathComponent)",
+                        url: workspaceURL,
+                        bytes: stats.bytes,
+                        fileCount: stats.fileCount,
+                        isApproximate: stats.isApproximate,
+                        lastModified: lastActivity,
+                        isSelected: false,
+                        detail: "MiniMax Code workspace tree older than 14 days"
+                    ))
                 }
             }
         }
@@ -2793,7 +2897,9 @@ final class DiskCleaner: @unchecked Sendable {
                 home + "/.botfleet/updates/",
                 home + "/Library/Caches/BotFleet/updates/",
                 home + "/.cache/huggingface/",
-                home + "/.ollama/models/blobs/"
+                home + "/.ollama/models/blobs/",
+                home + "/.minimax/v2/sessions/",
+                home + "/.minimax/v2/workspaces/"
             ]
             let isStaleUpdate = path.contains("/.BotFleet.update-") ||
                                path.contains("/.botfleet-server.node_modules.") ||
@@ -2857,9 +2963,19 @@ final class DiskCleaner: @unchecked Sendable {
         var isApproximate: Bool = false
     }
 
+    final class DirectoryTraversalBudget {
+        let deadline: TimeInterval
+        var remaining: Int
+        init(deadline: TimeInterval, remaining: Int) {
+            self.deadline = deadline
+            self.remaining = remaining
+        }
+    }
+
     /// Counts files and directories against the entry cap, including empty directories.
     /// Budgets are checked between filesystem calls, not kernel deadlines.
-    func directoryStats(at url: URL, maxDepth: Int = 32, fileCap: Int = 25_000) -> DirectoryStats {
+    func directoryStats(at url: URL, maxDepth: Int = 32, fileCap: Int = 25_000,
+                        traversalBudget: DirectoryTraversalBudget? = nil) -> DirectoryStats {
         let context = Self.scanContext
         let depth = min(maxDepth, context?.depth.maxDepth ?? maxDepth)
         let memoKey = "\(url.path)|\(depth)|\(fileCap)"
@@ -2873,7 +2989,7 @@ final class DiskCleaner: @unchecked Sendable {
             return stats
         }
         guard let measuredURL = scanURL(url) else { return partial() }
-        let deadline = scanUptime() + (context?.depth.targetDuration ?? 0.15)
+        let deadline = min(scanUptime() + (context?.depth.targetDuration ?? 0.15), traversalBudget?.deadline ?? .infinity)
         let keys: Set<URLResourceKey> = [.fileAllocatedSizeKey, .fileSizeKey, .isRegularFileKey,
             .isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey]
         guard let root = try? measuredURL.resourceValues(forKeys: keys) else { return partial() }
@@ -2897,13 +3013,15 @@ final class DiskCleaner: @unchecked Sendable {
             options: [], errorHandler: { _, _ in failed = true; return true }) else { return partial() }
         var visited = 0
         while !scanShouldStop() {
-            guard visited < fileCap, scanUptime() < deadline else { return partial() }
+            guard visited < fileCap, (traversalBudget?.remaining ?? 1) > 0,
+                  scanUptime() < deadline else { return partial() }
             guard let child = enumerator.nextObject() as? URL else {
                 if failed || stats.isApproximate { return partial() }
                 context?.memo[memoKey] = stats
                 return stats
             }
             visited += 1
+            traversalBudget?.remaining -= 1
             context?.remaining -= 1
             guard scanAllows(child) else { failed = true; enumerator.skipDescendants(); continue }
             guard let values = try? child.resourceValues(forKeys: keys) else { failed = true; continue }

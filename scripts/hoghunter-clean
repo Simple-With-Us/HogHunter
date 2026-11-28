@@ -35,6 +35,7 @@ Modes are mutually exclusive with --categories=... --policy to see everything.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import plistlib
@@ -117,10 +118,15 @@ IDLE_MIN_STALE_BUILD = 14 * 24 * 60  # 14d before ignored build output reads as 
 IDLE_MIN_TOOL_VERSION = 7 * 24 * 60  # 7d for superseded tool versions
 IDLE_MIN_TMP_BUILD_TREE = 60          # a throwaway agent checkout idle for an hour reads as left over
 IDLE_MIN_XCODE_SCRATCH = 24 * 60     # 24h before Xcode-shaped scratch reads as idle
+IDLE_MIN_XCODE_SCRATCH_PRESSURE = IDLE_MIN_SCRATCH  # 3h when disk free <= PRESSURE_RULE_FREE_GB
 IDLE_MIN_RELEASE = 7 * 24 * 60       # 7d before a superseded BotFleet release may go
 
 # Below this a candidate is not worth the delete.  Same floor the cache rules use.
 MIN_CANDIDATE_BYTES = 8 * 1024 * 1024
+# Report floor for tmp-large-trees: a seat scratch tree this size under
+# /private/tmp belongs on a person's screen whatever its name (2026-11-24).
+TMP_LARGE_TREE_BYTES = 1024 * 1024 * 1024
+TMP_LARGE_TREES_MIN_SHARE_SEC = 60.0
 
 # Owner's condition for this rule: it deletes only under real disk pressure.
 # `--band=full` alone is not that, because the pressure triggers also fire on a
@@ -150,7 +156,7 @@ PRESSURE_ONLY_RULES = frozenset(PRESSURE_RULES)
 # folder), and they reclaim almost nothing once every gate holds.  A clean run
 # has no reader for the report and does not pay for the walks.  xcode-scratch
 # left this set on Nov 5 (HH-219): it deletes what it can positively identify.
-REPORT_ONLY_WALK_RULES = frozenset({"stale-build-output", "tmp-build-trees"})
+REPORT_ONLY_WALK_RULES = frozenset({"stale-build-output", "tmp-build-trees", "tmp-large-trees"})
 
 # The early warning (HH-219).  Under this much free space, the ask-first trees
 # are sized, and when the report-only rows add up to more than the floor, the
@@ -190,6 +196,10 @@ FORBIDDEN_PREFIXES = (
     str(HOME / ".grok/worktrees"),
 )
 KEEP_SENTINEL = ".janitor-keep"
+# BSD find answers with -quit after the first match; GNU find (Linux CI)
+# refuses the option outright, so on Linux the probes run without it and pay
+# a bounded full walk instead.  The answer is identical either way.
+FIND_QUIT: tuple[str, ...] = ("-quit",) if sys.platform == "darwin" else ()
 # APFS system volume + sealed paths.  Deleting any of these bricks the Mac.
 FORBIDDEN_EXACT = (
     "/System", "/Library", "/private/var/db", "/private/var/folders/zz",
@@ -579,6 +589,13 @@ def is_peer_work(path: str) -> bool:
     except ValueError:
         return False
     if ".muse" in parts:
+        if (len(parts) == 6
+                and parts[0] == "Code"
+                and parts[2] == ".muse"
+                and parts[3] == "worktrees"
+                and parts[4].startswith("subagent-")
+                and parts[5] == ".next"):
+            return False
         return True
     return len(parts) >= 2 and parts[0] == "apps" and parts[1].startswith("botfleet-")
 
@@ -653,10 +670,15 @@ def holds_keep_sentinel(path: str, timeout: float, name: str = KEEP_SENTINEL) ->
 
     A probe that could not answer at all -- a timeout, or `find` failing to
     run -- is reported as unknown, and an unknown tree is never deleted.
+
+    `-quit` is BSD's stop-after-the-first-match; GNU find (Linux CI) refuses
+    the option outright, so there the probe asks without it and pays a
+    bounded full walk instead.  The answer is identical either way and the
+    timeout still caps the cost.
     """
     try:
         proc = subprocess.run(
-            ["find", path, "-iname", name, "-print", "-quit"],
+            ["find", path, "-iname", name, "-print", *FIND_QUIT],
             capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -994,6 +1016,9 @@ def touched_since(path: str, days: float) -> bool:
     days" outright.  find then exits non-zero, this fails closed to "touched",
     and the idle gate rejects every candidate -- so the rule silently frees
     nothing, with no error anywhere to say why.  Minutes parse on both.
+
+    As in the marker probe, `-quit` is BSD-only: GNU find (Linux CI) gets the
+    same command without it and walks the whole bounded tree instead.
     """
     try:
         # A full find walk can take minutes on a big tree, and it is called
@@ -1001,7 +1026,7 @@ def touched_since(path: str, days: float) -> bool:
         # share like every other scan probe here.  A timeout fails closed to
         # "touched" below, so a clamp never turns into a delete.
         proc = subprocess.run(
-            ["find", path, "-type", "f", "-newermt", f"-{days * 24 * 60:g} minutes", "-print", "-quit"],
+            ["find", path, "-type", "f", "-newermt", f"-{days * 24 * 60:g} minutes", "-print", *FIND_QUIT],
             capture_output=True, text=True, timeout=probe_timeout(120.0),
         )
     except (subprocess.TimeoutExpired, OSError, ValueError):
@@ -1011,12 +1036,14 @@ def touched_since(path: str, days: float) -> bool:
     return bool(proc.stdout.strip())
 
 
-def newest_file_age_min(path: str, max_entries: int = 4000) -> float:
+def newest_file_age_min(path: str, max_entries: int = 4000, max_seconds: float = 5.0) -> float:
     """Age in minutes of the newest file under path.
 
     0.0 means "something was written just now" -- the thing is live.
     Returns a very large number for a missing/empty path so callers can treat
-    "nothing here" as "safely idle".
+    "nothing here" as "safely idle".  The walk is bounded by wall-clock
+    (`max_seconds`) as well as entry count, so a huge tree cannot wedge
+    the tick; on timeout the answer reflects what was seen so far.
     """
     p = Path(path)
     if not p.exists():
@@ -1026,7 +1053,12 @@ def newest_file_age_min(path: str, max_entries: int = 4000) -> float:
     newest = 0.0
     seen = 0
     stack = [p]
+    deadline = time.monotonic() + max_seconds
+    timed_out = False
     while stack and seen < max_entries:
+        if seen % 256 == 0 and time.monotonic() >= deadline:
+            timed_out = True
+            break
         cur = stack.pop()
         try:
             st = cur.lstat()
@@ -1042,6 +1074,10 @@ def newest_file_age_min(path: str, max_entries: int = 4000) -> float:
         else:
             newest = max(newest, st.st_mtime)
             seen += 1
+    if timed_out and newest == 0.0:
+        # An incomplete walk proves nothing about idleness: fail closed
+        # as busy, never as safely idle.
+        return 0.0
     if newest == 0.0:
         return 1e9
     return (time.time() - newest) / 60.0
@@ -1880,6 +1916,8 @@ def rule_dev_caches() -> list[Candidate]:
         (HOME / "Library/Caches/copilot", "Copilot toolchain"),
         (HOME / "Library/Caches/org.swift.swiftpm", "SwiftPM artifacts"),
         (HOME / "Library/Caches/ms-playwright", "Playwright browsers"),
+        (HOME / ".cache/ms-playwright", "Playwright browsers"),
+        (HOME / ".cache/puppeteer", "Puppeteer browsers"),
         (HOME / "Library/Caches/@mmx-agentelectron-updater", "MMX updater staging"),
         (HOME / ".npm/_cacache", "npm _cacache"),
         (HOME / ".cache/uv", "uv cache"),
@@ -1929,6 +1967,61 @@ def _hoghunter_lane_refusal(s: str) -> str | None:
     verdict = holds_keep_sentinel(s, probe_timeout(60.0))
     if verdict.found or not verdict.known:
         return "holds a keep marker, or the look failed"
+    return None
+
+
+def _xcode_scratch_idle_min(free_gb: float | None = None) -> tuple[float, str]:
+    """Idle threshold for Xcode scratch and Muse worktree build caches.
+
+    Tightens from 24 hours to 3 hours while free space is at or below
+    PRESSURE_RULE_FREE_GB so rapid multi-build bursts cannot fill the disk
+    before the normal 24h window opens.  An unreadable df fails safe to 24h.
+    """
+    if free_gb is not None and free_gb <= PRESSURE_RULE_FREE_GB:
+        return (IDLE_MIN_XCODE_SCRATCH_PRESSURE, "3 hours")
+    return (IDLE_MIN_XCODE_SCRATCH, "24 hours")
+
+
+def _integration_cache_refusal(s: str) -> str | None:
+    """Why this ~/Code checkout's build cache must stay, or None.  Asked at
+    the scan and again right before the delete on a fresh open-file listing,
+    the same shape as the lane refusal above.  The rest is the full
+    xcode-scratch chain -- identity, the three idleness clocks, precious
+    contents, deep marker, nested clones, open handles, cwd and full-path
+    probes -- so the pool keeps every promise the policy JSON makes.  The one
+    gate left out is the bare-folder-name probe:  `build` is a word half this
+    Mac's command lines carry, it would starve the pool, and the full-path
+    probe below names the cache specifically already."""
+    d = Path(s)
+    if d.is_symlink() or not d.is_dir() or is_forbidden(s) or has_keep_sentinel(s):
+        return "not a plain folder, forbidden, or marked to keep"
+    refusal = _derived_data_identity_refusal(d)
+    if refusal is not None:
+        return refusal
+    # Cheap gates first, so an active or held-open cache never pays the three
+    # full-tree walks (precious, deep marker, clones) this helper ends with
+    # (review of PR 390).  The gates are conjunctive, so the order only
+    # changes what a refusal costs, never which trees refuse.
+    idle_min, idle_label = _xcode_scratch_idle_min(read_disk_free())
+    if (changed_age_min(s) < idle_min
+            or _shallow_newest_age_min(d) < idle_min
+            or _deep_newest_age_min(d) < idle_min):
+        return f"used in the last {idle_label}"
+    if tree_in_use(s):
+        return "held open"
+    if repo_has_process_cwd(s):
+        return "a process runs from it"
+    if process_names_path(s):
+        return "a running process names it"
+    precious = _derived_data_precious_refusal(d)
+    if precious is not None:
+        return precious
+    marker = holds_keep_sentinel(s, probe_timeout(60.0))
+    if marker.found or not marker.known:
+        return "holds a keep marker, or the look failed"
+    nested = regenerable_clones_only(d)
+    if nested is not None:
+        return nested
     return None
 
 
@@ -1984,6 +2077,56 @@ def rule_xcode_artifacts() -> list[Candidate]:
                 keep_verdict=MarkerVerdict(False, True),
                 recheck=recheck,
             ))
+
+    # Integration-tree build caches (owner direction 2026-11-23, HH-229
+    # lineage): an xcodebuild run without -derivedDataPath drops a build/
+    # beside the project, and the human integration trees under ~/Code are
+    # merged into constantly, so a checkout-activity gate would never open
+    # for them.  The cache's own idleness is the gate instead:  merges touch
+    # .git and sources, never the cache, and 24 h without a write reads as
+    # spent output (measured:  ~/Code/HogHunter/build, 4.1 GB, idle 4 days).
+    # Only a positively identified DerivedData-shaped directory qualifies,
+    # only the build/ directory is ever named, and sources stay untouched.
+    # The category is xcode-scratch so the 60 GB pressure line gates the
+    # delete exactly as it gates the /private/tmp roots.
+    code_root = HOME / "Code"
+    if code_root.is_dir() and not code_root.is_symlink():
+        try:
+            checkouts = sorted(code_root.iterdir())
+        except OSError as exc:
+            log(f"xcode-artifacts skipped {code_root}: {type(exc).__name__}: {exc}")
+            checkouts = []
+        for d in checkouts:
+            if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                _SCAN_BUDGET_EXHAUSTED = True
+                return cands
+            if d.is_symlink():
+                continue
+            build = d / "build"
+            if not build.is_dir() or build.is_symlink():
+                continue
+            if _integration_cache_refusal(str(build)) is not None:
+                continue
+            size = dir_bytes(str(build))
+            if size < MIN_CANDIDATE_BYTES:
+                continue
+
+            def recheck(build: str = str(build),
+                        identity=path_identity(str(build))) -> str | None:
+                if path_identity(build) != identity:
+                    return "the path now holds something else"
+                if _build_running():
+                    return "a build is running"
+                return _integration_cache_refusal(build)
+
+            cands.append(Candidate(
+                category="xcode-scratch", path=str(build), bytes=size,
+                reason="Integration checkout's xcodebuild cache, idle 24h+, no build running",
+                # The recheck walks for a marker right before the delete, so
+                # apply_delete does not need to walk the tree a second time.
+                keep_verdict=MarkerVerdict(False, True),
+                recheck=recheck,
+            ))
     support = HOME / "Library/Developer/Xcode/iOS DeviceSupport"
     if support.is_dir() and newest_file_age_min(str(support)) > 60 * 24 * 7:
         cands.append(Candidate(
@@ -1996,36 +2139,104 @@ def rule_xcode_artifacts() -> list[Candidate]:
     return cands
 
 
+# A runtime bundle name starts with the platform, then a separator, then the
+# version: "iOS 27.2.simruntime", "iOS_27_2.simruntime", "watchOS 11.4...".
+# The pattern is anchored so a directory that merely CONTAINS a platform word
+# ("Old iOS_26_5 backup") is not read as a runtime; whatever does not parse
+# is kept, never offered.
+_RUNTIME_NAME_RE = re.compile(r"\s*(ios|tvos|watchos|visionos|xros)[-_ ]+(\d+(?:[-_.]\d+)*)", re.I)
+
+
+def _runtime_platform_version(name: str) -> tuple[str, tuple[int, ...]] | None:
+    """('ios', (27, 2)) from a .simruntime bundle name, or None when it does not parse."""
+    m = _RUNTIME_NAME_RE.match(name)
+    if not m:
+        return None
+    version = tuple(int(p) for p in re.split(r"[-_.]", m.group(2)) if p.isdigit())
+    if not version:
+        return None
+    return m.group(1).lower(), version
+
+
+@functools.cache
+def _xcode_iphoneos_sdk_version() -> tuple[int, ...] | None:
+    """The iOS SDK version of the selected Xcode, or None when it cannot be read.
+
+    One probe per process: the selected Xcode does not change during a run,
+    and xcrun can take seconds on a cold start, so repeat callers share the
+    first answer.  A healthy xcrun answers in well under a second; a hung
+    one must not hold the scan, and the rule fails closed when it cannot
+    read the SDK.
+    """
+    try:
+        p = subprocess.run(
+            ["/usr/bin/xcrun", "--sdk", "iphoneos", "--show-sdk-version"],
+            capture_output=True, text=True, timeout=probe_timeout(5.0),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    m = re.match(r"\s*(\d+(?:\.\d+)*)", p.stdout or "")
+    if not m:
+        return None
+    return tuple(int(x) for x in m.group(1).split("."))
+
+
 def rule_simulator_runtimes() -> list[Candidate]:
-    """Installed iOS simulator runtimes.
+    """Installed simulator runtimes.
 
     Large (18+ GB measured), fully re-downloadable from Xcode.  Deleting a
     runtime does not touch CoreSimulator/Devices, which stays ask-first.
+
+    A runtime is kept, never offered, when any of these holds:
+    - it is the newest runtime of its platform (a freshly installed newer
+      release or beta is always kept);
+    - it is an iOS runtime whose major version matches the selected Xcode's
+      iOS SDK (the runtime that Xcode is built to use);
+    - the SDK version cannot be read, for any iOS runtime (the identity of
+      the runtime Xcode needs is then unknown, so the rule fails closed);
+    - its bundle name does not parse.
+    A platform with exactly one runtime therefore offers nothing.
     """
     if (proc_count_exact("xcodebuild") or proc_count("Simulator") or
             proc_count("CoreSimulatorService") or proc_count("[Bb]itrig")):
         return []
-    cands: list[Candidate] = []
     roots = [
         HOME / "Library/Developer/CoreSimulator/Profiles/Runtimes",
         Path("/Library/Developer/CoreSimulator/Profiles/Runtimes"),
     ]
+    installed: list[Path] = []
     for root in roots:
         if not root.is_dir() or has_keep_sentinel(str(root)):
             continue
         for rt in root.iterdir():
-            if not rt.is_dir() or is_forbidden(str(rt)):
+            if rt.is_dir() and not is_forbidden(str(rt)):
+                installed.append(rt)
+    newest: dict[str, tuple[int, ...]] = {}
+    for rt in installed:
+        pv = _runtime_platform_version(rt.name)
+        if pv and (pv[0] not in newest or pv[1] > newest[pv[0]]):
+            newest[pv[0]] = pv[1]
+    ios_sdk = _xcode_iphoneos_sdk_version()
+    cands: list[Candidate] = []
+    for rt in installed:
+        pv = _runtime_platform_version(rt.name)
+        if pv is None or pv[1] >= newest[pv[0]]:
+            continue
+        if pv[0] == "ios":
+            if ios_sdk is None or (ios_sdk and pv[1] and pv[1][0] == ios_sdk[0]):
                 continue
-            is_ios27 = bool(re.search(r"iOS[-_ ]?27", rt.name, re.I))
-            if is_ios27 and not CLEAN_IOS27:
-                continue
-            if newest_file_age_min(str(rt)) < 60 * 48 or open_handles(str(rt)):
-                continue
-            cands.append(Candidate(
-                category="simulator-runtimes", path=str(rt), bytes=dir_bytes(str(rt)),
-                reason="iOS simulator runtime untouched for 48h+, re-downloadable",
-                tier="expensive",
-            ))
+        is_ios27 = bool(re.search(r"iOS[-_ ]?27", rt.name, re.I))
+        if is_ios27 and not CLEAN_IOS27:
+            continue
+        if newest_file_age_min(str(rt)) < 60 * 48 or open_handles(str(rt)):
+            continue
+        cands.append(Candidate(
+            category="simulator-runtimes", path=str(rt), bytes=dir_bytes(str(rt)),
+            reason="older simulator runtime untouched for 48h+, re-downloadable",
+            tier="expensive",
+        ))
     return cands
 
 
@@ -2640,6 +2851,60 @@ def _agent_transient_dirs(root: Path) -> list[Path]:
     return out
 
 
+def _muse_next_refusal(wt: Path, next_dir: Path, idle_min: float) -> tuple[str | None, int]:
+    """Why a Muse subagent worktree .next cache must stay, or (None, total_bytes).
+
+    Uses one bounded scandir walk to check markers, .git entries, symlinks,
+    mtime idleness, and byte size together, so scan and delete-time recheck
+    share the exact same gate without paying multiple tree walks per worktree.
+    """
+    s = str(next_dir)
+    if next_dir.is_symlink() or not next_dir.is_dir() or is_forbidden(s) or has_keep_sentinel(s):
+        return "not a plain folder, forbidden, or marked to keep", 0
+    if changed_age_min(s) < idle_min:
+        return "touched recently", 0
+    if open_handles(s):
+        return "held open", 0
+    if repo_has_process_cwd(str(wt)):
+        return "a process runs from its worktree", 0
+    limit = probe_timeout(30.0)
+    if limit <= 0:
+        return "no scan time left", 0
+    deadline = time.monotonic() + limit
+    cutoff = time.time() - idle_min * 60
+    keep_lower = KEEP_SENTINEL.lower()
+    total_bytes = 0
+    stack = [s]
+    try:
+        if os.lstat(s).st_mtime > cutoff:
+            return "touched recently", 0
+        while stack:
+            if time.monotonic() > deadline:
+                return "walk timed out", 0
+            cur = stack.pop()
+            with os.scandir(cur) as entries:
+                for entry in entries:
+                    if time.monotonic() > deadline:
+                        return "walk timed out", 0
+                    if entry.is_symlink():
+                        return "holds a symlink", 0
+                    lname = entry.name.lower()
+                    if lname == keep_lower:
+                        return "holds a keep marker", 0
+                    if entry.name == ".git":
+                        return "holds a .git entry", 0
+                    st = entry.stat(follow_symlinks=False)
+                    if st.st_mtime > cutoff:
+                        return "touched recently", 0
+                    if stat.S_ISDIR(st.st_mode):
+                        stack.append(entry.path)
+                    else:
+                        total_bytes += st.st_size
+    except OSError:
+        return "could not read cache tree", 0
+    return None, total_bytes
+
+
 def rule_agent_state() -> list[Candidate]:
     """Transient state left behind by the coding agents that run on this Mac.
 
@@ -2727,6 +2992,143 @@ def rule_agent_state() -> list[Candidate]:
                 # so the apply phase does not walk it again.
                 keep_verdict=verdict,
             ))
+    # MiniMax accumulates thousands of per-task directories under
+    # ~/.minimax/background-tasks/bg_* and multi-GB migration backups under
+    # ~/.minimax/v2/sqlite/backups.  Prune stale entries individually so one
+    # recent task never pins years of old ones, and cap per run so a backlog
+    # never blows the scan budget.
+    bg_root = HOME / ".minimax" / "background-tasks"
+    if bg_root.is_dir() and not bg_root.is_symlink():
+        bg_idle_min = 3 * 24 * 60
+        bg_cutoff = time.time() - bg_idle_min * 60
+        bg_added = 0
+        try:
+            with os.scandir(bg_root) as it:
+                for entry in it:
+                    if bg_added >= 500:
+                        break
+                    if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                        _SCAN_BUDGET_EXHAUSTED = True
+                        return cands
+                    if not entry.name.startswith("bg_") or entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                        continue
+                    try:
+                        if entry.stat(follow_symlinks=False).st_mtime > bg_cutoff:
+                            continue
+                    except OSError:
+                        continue
+                    target = Path(entry.path)
+                    s = str(target)
+                    if is_forbidden(s) or has_keep_sentinel(s) or not claim(target):
+                        continue
+                    verdict = holds_keep_sentinel(s, probe_timeout(15.0))
+                    if verdict.found or not verdict.known:
+                        continue
+                    if newest_file_age_min(s) < bg_idle_min or touched_since(s, bg_idle_min / (24 * 60)) or open_handles(s):
+                        continue
+                    cands.append(Candidate(
+                        category="agent-state", path=s, bytes=dir_bytes(s),
+                        reason="stale MiniMax background task (>3d, idle, no open handles)",
+                        keep_verdict=verdict,
+                    ))
+                    bg_added += 1
+        except OSError:
+            pass
+    sqlite_backups = HOME / ".minimax" / "v2" / "sqlite" / "backups"
+    if sqlite_backups.is_dir() and not sqlite_backups.is_symlink():
+        try:
+            for entry in sqlite_backups.iterdir():
+                if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                    _SCAN_BUDGET_EXHAUSTED = True
+                    return cands
+                if entry.is_symlink() or not entry.is_file():
+                    continue
+                if "-before-" not in entry.name or "-migration-" not in entry.name:
+                    continue
+                if ".sqlite" not in entry.name:
+                    continue
+                s = str(entry)
+                if is_forbidden(s) or has_keep_sentinel(s) or not claim(entry):
+                    continue
+                verdict = holds_keep_sentinel(s, probe_timeout(15.0))
+                if verdict.found or not verdict.known:
+                    continue
+                if not idle_for(s, IDLE_MIN_TOOL_VERSION) or open_handles(s):
+                    continue
+                try:
+                    size = entry.stat().st_size
+                except OSError:
+                    continue
+                if size < MIN_CANDIDATE_BYTES:
+                    continue
+                cands.append(Candidate(
+                    category="agent-state", path=s, bytes=size,
+                    reason="superseded MiniMax SQLite migration backup (>7d, no open handles)",
+                    keep_verdict=verdict,
+                ))
+        except OSError:
+            pass
+    # Muse subagent worktrees under ~/Code/<repo>/.muse/worktrees/subagent-*
+    # accumulate multi-GB .next build caches while unmerged work keeps the
+    # worktree itself.  Prune only idle .next caches; never touch sources or git.
+    code_root = HOME / "Code"
+    if code_root.is_dir() and not code_root.is_symlink():
+        muse_idle_min, _ = _xcode_scratch_idle_min(read_disk_free())
+        muse_added = 0
+        try:
+            repos = sorted(code_root.iterdir(), key=lambda p: p.name)
+        except OSError:
+            repos = []
+        for repo in repos:
+            if muse_added >= 20:
+                break
+            if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                _SCAN_BUDGET_EXHAUSTED = True
+                return cands
+            if repo.is_symlink() or not repo.is_dir():
+                continue
+            muse_dir = repo / ".muse"
+            if muse_dir.is_symlink() or not muse_dir.is_dir():
+                continue
+            wt_root = muse_dir / "worktrees"
+            if wt_root.is_symlink() or not wt_root.is_dir():
+                continue
+            try:
+                wts = sorted(wt_root.iterdir(), key=lambda p: p.name)
+            except OSError:
+                continue
+            for wt in wts:
+                if muse_added >= 20:
+                    break
+                if _SCAN_DEADLINE is not None and scan_budget_left() <= 0:
+                    _SCAN_BUDGET_EXHAUSTED = True
+                    return cands
+                if not wt.name.startswith("subagent-") or wt.is_symlink() or not wt.is_dir():
+                    continue
+                next_dir = wt / ".next"
+                if next_dir.is_symlink() or not next_dir.is_dir():
+                    continue
+                s = str(next_dir)
+                if not claim(next_dir):
+                    continue
+                refusal, size = _muse_next_refusal(wt, next_dir, muse_idle_min)
+                if refusal is not None or size < MIN_CANDIDATE_BYTES:
+                    continue
+
+                def _muse_recheck(wt: Path = wt, next_dir: Path = next_dir,
+                                  identity=path_identity(s)) -> str | None:
+                    if path_identity(str(next_dir)) != identity:
+                        return "the path now holds something else"
+                    cur_idle, _ = _xcode_scratch_idle_min(read_disk_free())
+                    why, _ = _muse_next_refusal(wt, next_dir, cur_idle)
+                    return why
+
+                cands.append(Candidate(
+                    category="agent-state", path=s, bytes=size,
+                    reason="stale Muse subagent .next build cache, idle, no open handles",
+                    recheck=_muse_recheck,
+                ))
+                muse_added += 1
     # The agent session transcripts are Jay's history, not cache.  Report them.
     for name in _AGENT_HOMES:
         root = HOME / name
@@ -3248,11 +3650,98 @@ def _xcode_shape_refusal(tree: Path) -> str | None:
 _INFO_PLIST_MAX_BYTES = 64 * 1024
 
 
-def _xcode_scratch_roots() -> list[Path]:
-    """Where xcode-scratch looks: direct children only.  Read at call time so a
-    test's fake home is used.  ~/Library/Developer/Xcode/DerivedData is
-    xcode-artifacts' job and is not repeated here."""
-    return [XCODE_SCRATCH_ROOT, HOME / ".clutch" / "derived-data"]
+def _xcode_scratch_roots() -> list[tuple[Path, str]]:
+    """Where xcode-scratch looks, and how each root is read.  Read at call
+    time so a test's fake home is used.  "flat" walks the root's children;
+    "test-cache" is the app's own DerivedData cache, whose checkout bases
+    need the two-level read in _test_cache_scope.
+    ~/Library/Developer/Xcode/DerivedData is xcode-artifacts' job and is not
+    repeated here.  The app's own test-build cache joined the sweep
+    2026-11-27 after 17 GB of repeated full-suite runs sat idle there --
+    measured Jay's Mac, 2026-11-27, disk at 23 GB free.  xcodegen-post points
+    each checkout at ~/Library/Caches/HogHunterDerivedData/<checkout>-<hash>
+    as its DerivedDataCustomLocation, and a plain workspace build appends
+    Xcode's own HogHunter-<hash> below that, so the DerivedData root sits two
+    levels under the cache folder.  An explicit -derivedDataPath run (Release,
+    CI) pins the root where it is told and never lands in the cache."""
+    return [(XCODE_SCRATCH_ROOT, "flat"),
+            (HOME / ".clutch" / "derived-data", "flat"),
+            (HOME / "Library" / "Caches" / "HogHunterDerivedData", "test-cache")]
+
+
+def _test_cache_scope(child: Path) -> tuple[Path, Path, str | None] | None:
+    """Where one checkout base under the app's test cache keeps its
+    DerivedData root, or None when nothing here is Xcode's.  Returns
+    (identify, delete, refusal): the gates run on `identify` -- the real
+    build tree, whose freshness the base's ever-refreshing module caches
+    would otherwise hide -- and `delete` names what may go: the whole base
+    when everything beside the root is whitelisted build noise, else the
+    root alone.  A base child that is itself a DerivedData root (an explicit
+    -derivedDataPath run) identifies at the base.  A symlinked base is
+    skipped outright: the flat read refuses links by lstat, and the nested
+    read must not follow one into the target it points at."""
+    if child.is_symlink():
+        return None
+    if _xcode_shape_refusal(child) is None:
+        return child, child, None
+    inner = []
+    try:
+        for g in sorted(child.iterdir()):
+            if g.is_dir() and _xcode_shape_refusal(g) is None:
+                inner.append(g)
+        if len(inner) != 1:
+            return None
+        strays = [e.name for e in child.iterdir()
+                  if e != inner[0] and e.name not in _DERIVED_DATA_ENTRIES]
+    except OSError:
+        return None
+    return (inner[0], child if not strays else inner[0], None)
+
+
+def _test_cache_base_delete_refusal(base: Path) -> str | None:
+    """Why the whole checkout base may not go even though its DerivedData
+    root passed every gate, or None.  The base has no info.plist, so the
+    identity gate is skipped; every delete-safety gate of
+    _xcode_scratch_refusal runs on the base itself -- ownership, mount,
+    protected paths, idleness, precious content, keep markers, nested
+    repositories, open handles -- so a sibling the root's gates never saw
+    still stops a whole-base sweep.  A refusal here shrinks the delete to
+    the identified root alone."""
+    s = str(base)
+    try:
+        st = os.lstat(s)
+        root_dev = os.lstat(base.parent).st_dev
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            return "not a real directory"
+        if st.st_uid != os.getuid():
+            return "owned by someone else"
+        if st.st_dev != root_dev:
+            return "a mount point"
+    except OSError as exc:
+        return f"could not read it ({type(exc).__name__})"
+    if is_forbidden(s) or has_keep_sentinel(s):
+        return "protected"
+    idle_min, idle_label = _xcode_scratch_idle_min(read_disk_free())
+    if (changed_age_min(s) < idle_min
+            or _shallow_newest_age_min(base) < idle_min
+            or _deep_newest_age_min(base) < idle_min):
+        return f"used in the last {idle_label}"
+    precious = _derived_data_precious_refusal(base)
+    if precious:
+        return precious
+    marker = holds_keep_sentinel(s, probe_timeout(60.0))
+    if marker.found or not marker.known:
+        return "holds a keep marker, or the look failed"
+    nested = regenerable_clones_only(base)
+    if nested:
+        return nested
+    if tree_in_use(s):
+        return "held open"
+    if repo_has_process_cwd(s):
+        return "a process runs from it"
+    if process_names_path(s) or process_names_path(base.name):
+        return "a running process names it"
+    return None
 
 
 def _workspace_path_refusal(tree: Path) -> str | None:
@@ -3412,10 +3901,11 @@ def _xcode_scratch_refusal(tree: Path) -> str | None:
         return identity
     if is_forbidden(s) or has_keep_sentinel(s):
         return "protected"
-    if (changed_age_min(s) < IDLE_MIN_XCODE_SCRATCH
-            or _shallow_newest_age_min(tree) < IDLE_MIN_XCODE_SCRATCH
-            or _deep_newest_age_min(tree) < IDLE_MIN_XCODE_SCRATCH):
-        return "used in the last 24 hours"
+    idle_min, idle_label = _xcode_scratch_idle_min(read_disk_free())
+    if (changed_age_min(s) < idle_min
+            or _shallow_newest_age_min(tree) < idle_min
+            or _deep_newest_age_min(tree) < idle_min):
+        return f"used in the last {idle_label}"
     precious = _derived_data_precious_refusal(tree)
     if precious:
         return precious
@@ -3468,8 +3958,8 @@ def _partial_xcode_scratch_reportable(tree: Path) -> bool:
 
 
 def rule_xcode_scratch() -> list[Candidate]:
-    """Derived data a build left through -derivedDataPath, in /private/tmp or
-    in Clutch's derived-data folder.
+    """Derived data a build left through -derivedDataPath, in /private/tmp, in
+    Clutch's derived-data folder, or in the app's own test-build cache.
 
     A root that passes every gate in _xcode_scratch_refusal is a delete,
     checked again right before it, and main lets it through only at
@@ -3478,14 +3968,80 @@ def rule_xcode_scratch() -> list[Candidate]:
     """
     cands: list[Candidate] = []
     deadline = rule_deadline()
-    for root in _xcode_scratch_roots():
+    for root, mode in _xcode_scratch_roots():
         try:
             if root.is_symlink() or not root.is_dir():
                 continue
-            children = sorted(root.iterdir())
         except OSError:
             continue
-        for tree in children:
+        if mode == "test-cache":
+            # The app's test cache: each checkout keeps its DerivedData root
+            # at the base or one level down (see _xcode_scratch_roots and
+            # _test_cache_scope); the gates run on the identified root and
+            # the delete may cover the whole base.
+            try:
+                cache_children = sorted(root.iterdir())
+            except OSError:
+                continue
+            for child in cache_children:
+                if rule_out_of_time(deadline):
+                    return cands
+                scope = _test_cache_scope(child)
+                if scope is None:
+                    continue
+                identify, delete, base_refusal = scope
+                size = dir_bytes(str(delete))
+                if size < MIN_CANDIDATE_BYTES:
+                    continue
+                refusal = base_refusal or _xcode_scratch_refusal(identify)
+                if refusal is None and delete != identify:
+                    # The whole base was offered; it must pass its own
+                    # delete-safety gates, and a refusal shrinks the delete
+                    # to the identified root alone.
+                    base_refusal = _test_cache_base_delete_refusal(delete)
+                    if base_refusal is not None:
+                        delete = identify
+                        size = dir_bytes(str(delete))
+                        if size < MIN_CANDIDATE_BYTES:
+                            continue
+                if refusal is not None:
+                    cands.append(Candidate(
+                        category="xcode-scratch", path=str(delete), bytes=size,
+                        reason=f"Xcode derived data in {root} (report only; {refusal})",
+                        tier="ask-first", op="report",
+                    ))
+                    continue
+
+                def recheck(delete: Path = delete, child: Path = child,
+                            identity=path_identity(str(delete))) -> str | None:
+                    if path_identity(str(delete)) != identity:
+                        return "the path now holds something else"
+                    scope = _test_cache_scope(child)
+                    if scope is None:
+                        return "the checkout base no longer holds Xcode's tree"
+                    identify2, delete2, _ = scope
+                    if delete2 != identify2:
+                        base_ref = _test_cache_base_delete_refusal(delete2)
+                        if base_ref is not None:
+                            delete2 = identify2
+                    if delete2 != delete:
+                        return "the delete scope changed"
+                    return _xcode_scratch_refusal(identify2)
+
+                cands.append(Candidate(
+                    category="xcode-scratch", path=str(delete), bytes=size,
+                    reason="Xcode DerivedData root, idle 24h+, nothing holds or names it",
+                    tier="safe", op="delete",
+                    # The recheck walks for a marker right before the delete.
+                    keep_verdict=MarkerVerdict(False, True),
+                    recheck=recheck,
+                ))
+            continue
+        try:
+            trees = sorted(root.iterdir())
+        except OSError:
+            continue
+        for tree in trees:
             if rule_out_of_time(deadline):
                 return cands
             if _xcode_shape_refusal(tree) is not None:
@@ -3629,6 +4185,82 @@ def rule_tmp_build_trees() -> list[Candidate]:
             tier="ask-first", op="report",
         ))
     return cands
+
+def rule_tmp_large_trees() -> list[Candidate]:
+    """Large trees under /private/tmp, whatever their name.
+
+    Report only at every disk level, skipped on healthy-band cleans like the
+    other report-only walks.  tmp-build-trees only names agent candidate and
+    rebase checkouts, so a seat's scratch tree with an ordinary name is
+    invisible to the app at a healthy band -- measured 2026-11-23: four such
+    trees totalling about 21 GB under /private/tmp while the disk showed
+    144 GB free.  A person decides; this rule never deletes, whatever the
+    tree's write age, and a .janitor-keep marker is surfaced with the row
+    rather than hiding it.
+    """
+    global _SCAN_BUDGET_EXHAUSTED
+    if not XCODE_SCRATCH_ROOT.is_dir():
+        return []
+    # Sizing a 20 GB tree is a python-side walk with no subprocess for the
+    # scan-share guard to bound, so the rule stands down while less than a
+    # minute of the share remains and leaves it to the rules behind it;
+    # the stand-down marks the scan budget exhausted, so the truncation
+    # cursor carries the rest to the next run instead of the run reading
+    # as a complete pass over this rule.
+    if scan_budget_left() < TMP_LARGE_TREES_MIN_SHARE_SEC:
+        _SCAN_BUDGET_EXHAUSTED = True
+        return []
+    try:
+        children = sorted(XCODE_SCRATCH_ROOT.iterdir())
+    except OSError:
+        return []
+    cands: list[Candidate] = []
+    deadline = rule_deadline()
+    for tree in children:
+        if rule_out_of_time(deadline):
+            return cands
+        if tree.is_symlink() or not tree.is_dir():
+            continue
+        if _TMP_BUILD_TREE_RE.fullmatch(tree.name):
+            # tmp-build-trees already reports candidate and rebase checkouts;
+            # a second row would double-count the bytes in top_report_only.
+            continue
+        size = dir_bytes(str(tree))
+        if size < TMP_LARGE_TREE_BYTES:
+            continue
+        keep = ""
+        if has_keep_sentinel(str(tree)):
+            keep = "; carries a " + KEEP_SENTINEL + " marker"
+        cands.append(Candidate(
+            category="tmp-large-trees", path=str(tree), bytes=size,
+            reason=f"Large tree under /private/tmp, {_age_phrase(tree)} (report only{keep})",
+            tier="ask-first", op="report",
+        ))
+    return cands
+
+
+def _age_phrase(tree: Path) -> str:
+    """How recently this tree was written, phrased for a report row.
+
+    The capped walk runs first and is conclusive when it finds a fresh file;
+    only a tree that read old pays the unbounded find, and when that probe
+    cannot prove the tree quiet -- a timeout and a fresh file past the cap
+    look the same to it -- the row says so instead of asserting a write age
+    nobody measured.  A tree with no files at all says so instead of
+    rendering the sentinel.
+    """
+    idle = newest_file_age_min(str(tree))
+    if idle < IDLE_MIN_OK:
+        return f"newest write {idle:.0f} min ago"
+    if idle < 24 * 60:
+        # The unbounded find cannot add information inside its own window
+        # that the capped walk has not already answered.
+        return f"newest write {idle / 60.0:.1f} h ago"
+    if touched_since(str(tree), 1.0):
+        return "unbounded probe could not prove the tree quiet"
+    if idle >= 1e9:
+        return "no files"
+    return f"newest write {idle / 60.0:.1f} h ago"
 
 
 
@@ -4013,6 +4645,7 @@ RULES: dict[str, tuple[Callable[[], list[Candidate]], str]] = {
     "docker": (rule_docker, "Unused Docker images, containers, volumes, build cache"),
     "xcode-scratch": (rule_xcode_scratch, "Xcode DerivedData roots left in /private/tmp and ~/.clutch"),
     "tmp-build-trees": (rule_tmp_build_trees, "Agent build and rebase checkouts in /private/tmp (report only)"),
+    "tmp-large-trees": (rule_tmp_large_trees, "Large trees under /private/tmp, any name (report only)"),
     "stale-build-output": (rule_stale_build_output, "Stale ignored build output in main checkouts (report only)"),
     "ask-first": (rule_ask_first_inventory, "Ask-first inventory (report only)"),
 }

@@ -11,49 +11,28 @@ final class DetachedWindowManager {
 
     private init() {}
 
-    /// Opens or brings forward the standalone Hog Hunter window.
+    enum Destination { case activity, cleaner }
+    @Published private(set) var destination: Destination?
+
+    /// Opens or brings forward the dashboard without resetting the current page.
     func openDetachedWindow(store: HogStore) {
-        openDetachedWindow(store: store, initialTab: .overview, initialStorageSubTab: .apps, activateExisting: true)
+        show(store: store)
     }
 
-    /// Opens the standalone window on the Activity tab, where the full
-    /// flagged-issues list sits above the process list.  The quick view's
-    /// card shows three; this is where the rest are read and acted on.
     func openActivity(store: HogStore) {
-        openDetachedWindow(store: store, initialTab: .activity, initialStorageSubTab: .apps, activateExisting: false)
-        // An already-open window keeps its tab; bring it forward.
-        if let existing = window {
-            if existing.isMiniaturized {
-                existing.deminiaturize(nil)
-            }
-            existing.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-        }
+        show(store: store, destination: .activity)
     }
 
-    /// Opens the standalone window on the Disk Cleaner, so the quick view's
-    /// Clean button lands where the cleanup runs instead of on Overview.
     func openCleaner(store: HogStore) {
-        openDetachedWindow(store: store, initialTab: .storage, initialStorageSubTab: .clean, activateExisting: false)
-        // An already-open window keeps its tab; bring it forward.
-        if let existing = window {
-            if existing.isMiniaturized {
-                existing.deminiaturize(nil)
-            }
-            existing.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-        }
+        show(store: store, destination: .cleaner)
     }
 
-    private func openDetachedWindow(store: HogStore, initialTab: PanelTab, initialStorageSubTab: HogHunterPanel.StorageSubTab, activateExisting: Bool) {
+    private func show(store: HogStore, destination: Destination? = nil) {
+        self.destination = destination
         if let existing = window {
-            if activateExisting {
-                if existing.isMiniaturized {
-                    existing.deminiaturize(nil)
-                }
-                existing.makeKeyAndOrderFront(nil)
-                NSApp.activate(ignoringOtherApps: true)
-            }
+            if existing.isMiniaturized { existing.deminiaturize(nil) }
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
             return
         }
 
@@ -68,7 +47,7 @@ final class DetachedWindowManager {
         win.title = "Hog Hunter"
         win.contentMinSize = NSSize(width: HogHunterPanel.dashboardMinimumWidth, height: 580)
 
-        let rootView = HogHunterPanel(initialTab: initialTab, initialStorageSubTab: initialStorageSubTab)
+        let rootView = HogHunterPanel()
             .environmentObject(store)
         win.contentViewController = NSHostingController(rootView: rootView)
         win.setContentSize(size)
@@ -83,6 +62,7 @@ final class DetachedWindowManager {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.window = nil
+                self?.destination = nil
             }
         }
 

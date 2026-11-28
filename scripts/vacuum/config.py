@@ -130,7 +130,9 @@ DEFAULT_LANES: dict[str, Any] = {
     # Argv, never a shell.  A leading ~ means the Vacuum's home.  HOGHUNTER_LANE_DOCTOR_COMMAND overrides it.
     "doctor_command": ["~/apps/lane", "ls", "--json"],
     # Merged worktree retention.  The other lane safety gates remain fixed in code.
-    "retire_min_days": 7,
+    # Three days is the floor the owner runs with, and config/robotic-vacuum.json
+    # ships the same number; the two must not drift apart.
+    "retire_min_days": 3,
 }
 
 # Steps that stay off until the owner turns them on (--set-step STEP on).  iOS DeviceSupport is a Mode 3 item in
@@ -413,7 +415,7 @@ def apply_env_overrides(base: dict[str, Any], env: Mapping[str, str] | None = No
                 janitor["low_free_gib"] = val
 
     # Merged worktree retention.  An explicitly invalid override fails safe to
-    # the built-in seven-day default rather than accepting a stale file value.
+    # the built-in three-day default rather than accepting a stale file value.
     retire_keys = (
         "hoghunter.maintain.janitor.retireMinDays",
         "HOGHUNTER_MAINTAIN_JANITOR_RETIRE_MIN_DAYS",
@@ -421,7 +423,7 @@ def apply_env_overrides(base: dict[str, Any], env: Mapping[str, str] | None = No
     for key in retire_keys:
         if key in env:
             lanes = base.setdefault("lanes", {})
-            lanes["retire_min_days"] = parse_retire_min_days(env[key]) or 7
+            lanes["retire_min_days"] = parse_retire_min_days(env[key]) or DEFAULT_LANES["retire_min_days"]
             break
 
     # Resource watch thresholds

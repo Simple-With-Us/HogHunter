@@ -202,6 +202,10 @@ final class DiskCleanerStore: ObservableObject {
     func setTier(_ tier: CleanTier) {
         guard tier != selectedTier else { return }
         selectedTier = tier
+        // A tier switch voids any Extreme acknowledgement: returning to
+        // Extreme must ask again, so a stale ack cannot authorise a later
+        // destructive scan/clean it was never shown for.
+        acknowledgedExtremeDisclaimer = false
         if manualScanOnly { discardResults() } else { scan() }
     }
 
@@ -235,6 +239,14 @@ final class DiskCleanerStore: ObservableObject {
     }
 
     /// Initiates a full disk clutter scan for the active tier.
+    #if DEBUG
+    /// Test seam: a scan report without a disk scan, so a layout test can draw
+    /// the category list.  Release builds contain no entry point.
+    func setReportForTest(_ report: CleanScanReport?) {
+        self.report = report
+    }
+    #endif
+
     func scan(depth: DiskCleaner.ScanDepth = .quick) {
         guard ApplicationRunMode.current != .uiHarness else { return }
         cancelScan()
@@ -251,6 +263,8 @@ final class DiskCleanerStore: ObservableObject {
         let activeExclusions = exclusions
         let scanOperation = self.scanOperation
         scanTask = Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+
             let scanReport = await scanOperation(currentTier, activeExclusions, depth, { partial in
                     Task { @MainActor [weak self] in
                         guard let self, self.currentScanId == scanId, self.isScanInFlight,
@@ -269,7 +283,7 @@ final class DiskCleanerStore: ObservableObject {
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                guard let self, self.currentScanId == scanId else { return }
+                guard self.currentScanId == scanId else { return }
                 self.report = scanReport
                 // A fresh scan supersedes any report an edit marked stale.
                 self.reportIsStale = false
@@ -364,38 +378,37 @@ final class DiskCleanerStore: ObservableObject {
         return items.filter { selectedItemIds.contains($0.id) }.reduce(0 as UInt64) { $0 &+ $1.bytes }
     }
 
-    func totalSelectedBytes() -> UInt64 {
-        guard let report else { return 0 }
-        var sum: UInt64 = 0
+    /// Selection totals from one pass over the report, cached on
+    /// (scan, selection).  The hero, bottom bar and confirmation each
+    /// asked for these per render, so one checkbox toggle cost five
+    /// full scans over thousands of items.
+    private var totalsCache: (scannedAt: Date, ids: Set<String>, total: UInt64, internalBytes: UInt64, externalBytes: UInt64, approximate: Bool)?
+
+    private func selectionTotals() -> (total: UInt64, internalBytes: UInt64, externalBytes: UInt64, approximate: Bool) {
+        guard let report else { return (0, 0, 0, false) }
+        if let cache = totalsCache, cache.scannedAt == report.scannedAt, cache.ids == selectedItemIds {
+            return (cache.total, cache.internalBytes, cache.externalBytes, cache.approximate)
+        }
+        var total: UInt64 = 0
+        var internalBytes: UInt64 = 0
+        var externalBytes: UInt64 = 0
+        var approximate = false
         for cat in report.categories {
             for item in cat.items where selectedItemIds.contains(item.id) {
-                sum &+= item.bytes
+                total &+= item.bytes
+                if item.isExternal { externalBytes &+= item.bytes } else { internalBytes &+= item.bytes }
+                if item.isApproximate { approximate = true }
             }
         }
-        return sum
+        totalsCache = (report.scannedAt, selectedItemIds, total, internalBytes, externalBytes, approximate)
+        return (total, internalBytes, externalBytes, approximate)
     }
 
-    func totalSelectedInternalBytes() -> UInt64 {
-        guard let report else { return 0 }
-        var sum: UInt64 = 0
-        for cat in report.categories {
-            for item in cat.items where selectedItemIds.contains(item.id) && !item.isExternal {
-                sum &+= item.bytes
-            }
-        }
-        return sum
-    }
+    func totalSelectedBytes() -> UInt64 { selectionTotals().total }
 
-    func totalSelectedExternalBytes() -> UInt64 {
-        guard let report else { return 0 }
-        var sum: UInt64 = 0
-        for cat in report.categories {
-            for item in cat.items where selectedItemIds.contains(item.id) && item.isExternal {
-                sum &+= item.bytes
-            }
-        }
-        return sum
-    }
+    func totalSelectedInternalBytes() -> UInt64 { selectionTotals().internalBytes }
+
+    func totalSelectedExternalBytes() -> UInt64 { selectionTotals().externalBytes }
 
     func totalSelectedItemsCount() -> Int {
         selectedItemIds.count
@@ -403,10 +416,7 @@ final class DiskCleanerStore: ObservableObject {
 
     /// True when any selected item's size walk hit its file cap, so the
     /// selected total is a lower bound, not an exact size.
-    func selectionIsApproximate() -> Bool {
-        guard let report else { return false }
-        return report.categories.flatMap { $0.items }.contains { $0.isApproximate && selectedItemIds.contains($0.id) }
-    }
+    func selectionIsApproximate() -> Bool { selectionTotals().approximate }
 
     func totalDiscoveredBytes() -> UInt64 {
         report?.totalBytes ?? 0
@@ -463,6 +473,8 @@ final class DiskCleanerStore: ObservableObject {
         NotificationCenter.default.post(name: .diskCleanerProgressChanged, object: initialUpdate)
 
         cleanTask = Task.detached(priority: .userInitiated) { [weak self, cleaner] in
+            guard let self else { return }
+
             var lastReportedTime = Date.distantPast
             var lastReportedProgress: Double = -1.0
             let result = await cleaner.clean(items: itemsToClean, tier: currentTier, createSnapshot: createSnapshot, exclusions: activeExclusions) { progress, currentItem in
@@ -496,7 +508,7 @@ final class DiskCleanerStore: ObservableObject {
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                guard let self, self.currentCleanId == cleanId else { return }
+                guard self.currentCleanId == cleanId else { return }
                 // An exclusion or temp-policy edit mid-clean left this report
                 // describing paths the scan never saw.  Drop it now that the
                 // deletion is done; `state` is still `.cleaning`, so the result

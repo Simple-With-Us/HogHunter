@@ -18,8 +18,11 @@ final class DashboardNavigationTests: XCTestCase {
     func testEveryServerSectionHasItsOwnAnswer() {
         XCTAssertNil(HogHunterPanel.serverSection(for: .network),
                      "the snapshot cannot answer the network section")
-        let answered = PanelTab.allCases.compactMap { HogHunterPanel.serverSection(for: $0) }
-        XCTAssertEqual(answered.count, PanelTab.allCases.count - 1)
+        XCTAssertNil(HogHunterPanel.serverSection(for: .overview),
+                     "Overview is shared by both hosts, not a server section")
+        XCTAssertEqual(PanelTab.hostSections, [.activity, .storage, .maintenance, .network])
+        let answered = PanelTab.hostSections.compactMap { HogHunterPanel.serverSection(for: $0) }
+        XCTAssertEqual(answered.count, PanelTab.hostSections.count - 1)
         XCTAssertEqual(answered.count, Set(answered).count,
                        "two sections answer with the same readings")
     }

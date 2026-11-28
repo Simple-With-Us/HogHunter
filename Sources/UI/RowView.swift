@@ -13,10 +13,24 @@ struct HogRowView: View {
     let store: HogStore
     var sort: HogSort = .cpu
     let onQuit: () -> Void
+    /// Tame/untame from the context menu goes through the same confirmation
+    /// as `MacProcessActions` and the iPhone, instead of acting at once.
+    @State private var pendingTame: Bool?
 
     /// History rows describe a key that may be long gone, so they offer none
     /// of the actions that need a live pid.
     private var isLive: Bool { !row.keys.isEmpty }
+
+    /// What VoiceOver reads for the combined row, built by the pure helper
+    /// so it can be tested without a store.
+    var accessibilityLabel: String {
+        HogRowAccessibility.label(
+            name: row.name, detail: row.detail,
+            cpuText: HogFormat.cpu(row.cpuPercent, scale: scale, coreCount: coreCount),
+            memoryText: HogFormat.memory(row.memoryBytes),
+            isTamed: row.isTamed, isSleepBlocker: row.isSleepBlocker,
+            quitBlockReason: isLive ? row.quitBlockReason : nil)
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -71,7 +85,30 @@ struct HogRowView: View {
         )
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel)
+        // The combined element swallows the Quit button, so Quit is offered
+        // again as a named VoiceOver action; the confirmation still decides.
+        .accessibilityActions {
+            if row.canQuit {
+                Button("Quit") { onQuit() }
+            }
+        }
         .contextMenu { menu }
+        .confirmationDialog(
+            pendingTame == true ? "Tame \(row.name)?" : "Restore Priority for \(row.name)?",
+            isPresented: Binding(get: { pendingTame != nil }, set: { if !$0 { pendingTame = nil } }),
+            titleVisibility: .visible
+        ) {
+            if let isTame = pendingTame {
+                Button(isTame ? "Tame App (Lower Priority)" : "Restore Priority") {
+                    pendingTame = nil
+                    if isTame { store.tame(row) } else { store.untame(row) }
+                }
+            }
+            Button("Cancel", role: .cancel) { pendingTame = nil }
+        } message: {
+            Text("This changes scheduling priority and may affect response times.\u{00A0} Hog Hunter rechecks the process identity and its protections before acting.")
+        }
     }
 
     @ViewBuilder
@@ -113,9 +150,9 @@ struct HogRowView: View {
         if isLive {
             if row.canTame {
                 if row.isTamed {
-                    Button("Restore Priority (Untame)") { store.untame(row) }
+                    Button("Restore Priority (Untame)") { pendingTame = false }
                 } else {
-                    Button("Tame Hog (Background QoS)") { store.tame(row) }
+                    Button("Tame Hog (Background QoS)") { pendingTame = true }
                 }
                 Divider()
             }
@@ -151,6 +188,22 @@ struct HogRowView: View {
                 store.lastError = message
             }
         }
+    }
+}
+
+/// Builds the VoiceOver label for a hog row.  Pure, so the spoken text is
+/// testable without a store or a running sampler.
+enum HogRowAccessibility {
+    static func label(name: String, detail: String, cpuText: String, memoryText: String,
+                      isTamed: Bool, isSleepBlocker: Bool, quitBlockReason: String?) -> String {
+        var pieces = [name]
+        if !detail.isEmpty { pieces.append(detail) }
+        pieces.append("CPU \(cpuText)")
+        pieces.append("Memory \(memoryText)")
+        if isTamed { pieces.append("Tamed") }
+        if isSleepBlocker { pieces.append("Keeping the Mac awake") }
+        if let quitBlockReason { pieces.append("Quit is unavailable: \(quitBlockReason)") }
+        return pieces.joined(separator: ", ")
     }
 }
 

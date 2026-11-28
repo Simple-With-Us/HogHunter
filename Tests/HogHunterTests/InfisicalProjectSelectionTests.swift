@@ -50,7 +50,7 @@ private final class ProjectGate<Value> {
 @MainActor
 private final class ProjectFixture {
     static let a = "00000000-1111-2222-3333-444444444444"
-    static let b = "11111111-2222-3333-4444-555555555555"
+    nonisolated static let b = "11111111-2222-3333-4444-555555555555"
     static let c = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     static let oldValues = [
         InfisicalKey.refreshInterval: "7",

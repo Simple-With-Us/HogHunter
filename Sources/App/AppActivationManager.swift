@@ -67,9 +67,10 @@ final class AppActivationManager {
         let targetPolicy: NSApplication.ActivationPolicy = hasOpenWindows ? .regular : .accessory
         if NSApp.activationPolicy() != targetPolicy {
             NSApp.setActivationPolicy(targetPolicy)
-            if targetPolicy == .regular {
-                NSApp.activate(ignoringOtherApps: true)
-            }
+            // The policy is about the Dock icon and the Command-Tab list, not
+            // about focus.  Activating here pulled Hog Hunter over whatever
+            // the owner was working in, so the app now changes policy without
+            // taking the keyboard.
         }
     }
 
@@ -136,7 +137,12 @@ struct WindowActivator: NSViewRepresentable {
     static func front() {
         DispatchQueue.main.async {
             AppActivationManager.shared.updatePolicy()
-            NSApp.activate(ignoringOtherApps: true)
+            // Order the windows forward without activating the app: the
+            // owner's keyboard stays where it is.  `NSApp.activate` took the
+            // focus away from whatever they were typing in.
+            for window in NSApp.windows where window.isVisible {
+                window.orderFrontRegardless()
+            }
         }
     }
 
@@ -155,8 +161,16 @@ struct WindowActivator: NSViewRepresentable {
                 if window.isMiniaturized {
                     window.deminiaturize(nil)
                 }
-                window.makeKeyAndOrderFront(nil)
+                // The window comes forward, but the keyboard stays where the
+                // owner left it.  A window they opened from the menu bar
+                // arrives with the app already active, so it still takes the
+                // key; a window that appears on its own does not steal it
+                // from whatever they are typing in.
+                let ownerIsActive = NSApp.isActive
                 window.orderFrontRegardless()
+                if ownerIsActive {
+                    window.makeKeyAndOrderFront(nil)
+                }
             }
         }
     }

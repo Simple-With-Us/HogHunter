@@ -29,6 +29,11 @@ final class MaintainStore: ObservableObject {
     /// script before the step it runs is really on.
     @Published private(set) var stepTogglesPersisted: Bool = true
     @Published private(set) var isRunningNow = false
+    /// When the current run started, and the id that ties its panel error
+    /// back to it.  Set together when a run starts, cleared together when it
+    /// finishes, so a non-nil pair always means a run is in flight.
+    @Published private(set) var runningSince: Date?
+    @Published private(set) var currentRunId: String?
     @Published var lastError: String?
 
     // Custom scripts & plugins
@@ -176,11 +181,11 @@ final class MaintainStore: ObservableObject {
         let json = (try? Data(contentsOf: configURL))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         let lanes = json?["lanes"] as? [String: Any]
-        let fileRetireDays = Self.validRetireDays(lanes?["retire_min_days"]) ?? 7
+        let fileRetireDays = Self.validRetireDays(lanes?["retire_min_days"]) ?? 3
         let infisicalRetireText = infisical.isConfigured
             ? infisicalStore.string(for: InfisicalKey.maintainJanitorRetireMinDays)
             : nil
-        let retireDays = infisicalRetireText.map { Self.validRetireDays($0) ?? 7 } ?? fileRetireDays
+        let retireDays = infisicalRetireText.map { Self.validRetireDays($0) ?? 3 } ?? fileRetireDays
         if worktreeRetireDaysPersisted, worktreeRetireMinDays != retireDays {
             worktreeRetireMinDays = retireDays
         }
@@ -348,6 +353,10 @@ final class MaintainStore: ObservableObject {
         guard !isRunningNow else { return nil }
         isRunningNow = true
         lastError = nil
+        let runId = UUID().uuidString
+        let startedAt = Date()
+        runningSince = startedAt
+        currentRunId = runId
         let launcher = self.launcher
         return Task { [weak self] in
             let outcome: Result<Bool, Error>
@@ -357,17 +366,27 @@ final class MaintainStore: ObservableObject {
                 outcome = .failure(error)
             }
             guard let self else { return }
+            let elapsed = Date().timeIntervalSince(startedAt)
             switch outcome {
             case .success(true):
                 break
             case .success(false):
-                self.lastError = "Cleaning did not finish cleanly.\u{00A0} Check Logs for details."
+                self.lastError = "Cleaning did not finish cleanly.\u{00A0} Check Logs for details.\u{00A0} \(Self.runDiagnosis(runId: runId, elapsed: elapsed))"
             case .failure:
-                self.lastError = "Cleaning could not be started.\u{00A0} Check Logs for details."
+                self.lastError = "Cleaning could not be started.\u{00A0} Check Logs for details.\u{00A0} \(Self.runDiagnosis(runId: runId, elapsed: elapsed))"
             }
+            self.runningSince = nil
+            self.currentRunId = nil
             self.isRunningNow = false
             self.refresh()
         }
+    }
+
+    /// The parenthetical that ties a failed run's panel error back to the run
+    /// that produced it: which run, and how long it lasted.  Carries no path,
+    /// no argument, and no raw error text, so it is safe for the panel.
+    nonisolated static func runDiagnosis(runId: String, elapsed: TimeInterval) -> String {
+        "(run \(runId), \(String(format: "%.1fs", max(0, elapsed))))"
     }
 
     /// Runs one named step and nothing else.
@@ -385,6 +404,10 @@ final class MaintainStore: ObservableObject {
         guard !isRunningNow else { return nil }
         isRunningNow = true
         lastError = nil
+        let runId = UUID().uuidString
+        let startedAt = Date()
+        runningSince = startedAt
+        currentRunId = runId
         let launcher = self.launcher
         return Task { [weak self] in
             let outcome: Result<Bool, Error>
@@ -394,14 +417,17 @@ final class MaintainStore: ObservableObject {
                 outcome = .failure(error)
             }
             guard let self else { return }
+            let elapsed = Date().timeIntervalSince(startedAt)
             switch outcome {
             case .success(true):
                 break
             case .success(false):
-                self.lastError = "That step did not finish cleanly.\u{00A0} Check Logs for details."
+                self.lastError = "That step did not finish cleanly.\u{00A0} Check Logs for details.\u{00A0} \(Self.runDiagnosis(runId: runId, elapsed: elapsed))"
             case .failure:
-                self.lastError = "That step could not be started.\u{00A0} Check Logs for details."
+                self.lastError = "That step could not be started.\u{00A0} Check Logs for details.\u{00A0} \(Self.runDiagnosis(runId: runId, elapsed: elapsed))"
             }
+            self.runningSince = nil
+            self.currentRunId = nil
             self.isRunningNow = false
             self.refresh()
         }
