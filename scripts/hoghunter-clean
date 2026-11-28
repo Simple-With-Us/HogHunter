@@ -2197,16 +2197,21 @@ def rule_brew() -> list[Candidate]:
 def rule_docker() -> list[Candidate]:
     """Unused Docker images, containers, volumes, and build cache.
 
-    `docker system prune` removes stopped containers, dangling images,
-    unused networks, and build cache -- nothing a running container needs.
-    `docker volume prune` removes volumes no container references.
-    Tagged images are left alone: they cost nothing to re-pull and a
-    fleet host may need them again between runs.
+    The docker CLI on this Mac talks to OrbStack (context: orbstack), whose
+    socket lives at ~/.orbstack/run/docker.sock. `docker system prune`
+    removes stopped containers, dangling images, unused networks, and build
+    cache -- nothing a running container needs. `docker volume prune`
+    removes volumes no container references. Tagged images are left alone:
+    they cost nothing to re-pull and a fleet host may need them again
+    between runs.
     """
     if not shutil.which("docker"):
         return []
     # Never prune while the daemon or a client is actively working.
-    if proc_count("docker") or proc_count("dockerd") or proc_count("containerd"):
+    # OrbStack runs the Docker-compatible engine on this Mac as the
+    # OrbStack process (not docker/dockerd/containerd), so it must be
+    # checked too.
+    if proc_count("docker") or proc_count("dockerd") or proc_count("containerd") or proc_count("OrbStack"):
         return []
     out = _run(["docker", "system", "df"], timeout=probe_timeout(30))
     if not out:
@@ -2229,7 +2234,7 @@ def rule_docker() -> list[Candidate]:
     if not reclaimable:
         return []
     return [Candidate(
-        category="docker", path="/var/run/docker.sock", bytes=0,
+        category="docker", path=os.path.expanduser("~/.orbstack/run/docker.sock"), bytes=0,
         reason="docker system df reports reclaimable images, containers, volumes, or build cache",
         op="docker-system-prune",
         detail="docker system prune + docker volume prune; tagged images are never touched",
