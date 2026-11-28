@@ -110,6 +110,17 @@
         "node count > 20"
       ]
     },
+      {
+            "name": "docker",
+            "tier": "safe",
+            "op": "docker-system-prune",
+            "title": "Unused Docker images, containers, volumes, build cache",
+            "$rationale": "Docker system prune removes stopped containers, dangling images, unused networks, and build cache -- nothing a running container needs. Docker volume prune removes volumes no container references. Tagged images are left alone. Measured 2026-11-27: 1.39 GB stopped container, 3.62 GB unused image, 1.79 GB unused volume on this Mac.",
+            "skipWhenAny": [
+                  "the docker daemon is not installed",
+                  "a docker, dockerd, or containerd process is alive"
+            ]
+      },
     {
       "name": "app-caches",
       "tier": "safe",

@@ -2193,6 +2193,49 @@ def rule_brew() -> list[Candidate]:
     )]
 
 
+
+def rule_docker() -> list[Candidate]:
+    """Unused Docker images, containers, volumes, and build cache.
+
+    `docker system prune` removes stopped containers, dangling images,
+    unused networks, and build cache -- nothing a running container needs.
+    `docker volume prune` removes volumes no container references.
+    Tagged images are left alone: they cost nothing to re-pull and a
+    fleet host may need them again between runs.
+    """
+    if not shutil.which("docker"):
+        return []
+    # Never prune while the daemon or a client is actively working.
+    if proc_count("docker") or proc_count("dockerd") or proc_count("containerd"):
+        return []
+    out = _run(["docker", "system", "df"], timeout=probe_timeout(30))
+    if not out:
+        return []
+    # docker system df prints a summary table; any reclaimable number
+    # above zero means there is something to prune.
+    reclaimable = False
+    for ln in out.splitlines():
+        if "Reclaimable" in ln or "reclaimable" in ln:
+            continue
+        parts = ln.split()
+        if len(parts) >= 4:
+            # Columns: TYPE TOTAL ACTIVE SIZE RECLAIMABLE
+            try:
+                if float(parts[-1].replace("GB", "").replace("MB", "").replace("B", "")) > 0:
+                    reclaimable = True
+                    break
+            except ValueError:
+                continue
+    if not reclaimable:
+        return []
+    return [Candidate(
+        category="docker", path="/var/run/docker.sock", bytes=0,
+        reason="docker system df reports reclaimable images, containers, volumes, or build cache",
+        op="docker-system-prune",
+        detail="docker system prune + docker volume prune; tagged images are never touched",
+    )]
+
+
 def _ask_first_peer_work(size: Callable[[str], int]) -> list[Candidate]:
     """Big trees that are someone's work or a backup.  Surfaced, never deleted.
 
@@ -3955,6 +3998,7 @@ RULES: dict[str, tuple[Callable[[], list[Candidate]], str]] = {
     "logs": (rule_unbounded_logs, "Unbounded logs (tail-truncated)"),
     "sqlite-wal": (rule_sqlite_wals, "Oversized SQLite WAL (checkpointed)"),
     "brew": (rule_brew, "Homebrew obsolete versions"),
+    "docker": (rule_docker, "Unused Docker images, containers, volumes, build cache"),
     "xcode-scratch": (rule_xcode_scratch, "Xcode DerivedData roots left in /private/tmp and ~/.clutch"),
     "tmp-build-trees": (rule_tmp_build_trees, "Agent build and rebase checkouts in /private/tmp (report only)"),
     "stale-build-output": (rule_stale_build_output, "Stale ignored build output in main checkouts (report only)"),
@@ -4374,6 +4418,11 @@ def apply_candidate(c: Candidate) -> None:
             freed, err = apply_simctl_runtime_delete(c.path.split(":", 1)[1])
         elif c.op == "brew-cleanup":
             _run(["/opt/homebrew/bin/brew", "cleanup", "--prune=all"], timeout=op_timeout(600))
+            freed, err = 0, ""
+
+        elif c.op == "docker-system-prune":
+            _run(["docker", "system", "prune", "--force"], timeout=op_timeout(600))
+            _run(["docker", "volume", "prune", "--force"], timeout=op_timeout(300))
             freed, err = 0, ""
         else:
             return
