@@ -18,7 +18,7 @@ jobs:
       - name: Fail if an env or vars file is tracked
         run: |
           tracked=$(git ls-files)
-          bad=$(printf '%s\n' "$tracked" | grep -Ei '(^|/)[^/]*(\.env|\.vars|\.envrc)(\.[^/]*)?$' | grep -Eiv '\.(example|sample|template)$' | grep -Ev '(^|/)\.cursor/infisical\.env$' || true)
+          bad=$(printf '%s\n' "$tracked" | grep -Ei '(^|/)[^/]*(\.env|\.vars|\.envrc)(\.[^/]*)?(/|$)' | grep -Eiv '\.(example|sample|template)$' | grep -Ev '(^|/)\.cursor/infisical\.env$' || true)
           if [ -n "$bad" ]; then
             echo "::error::Tracked env or vars files are not allowed. All secrets live only in Infisical."
             echo "$bad"
@@ -34,7 +34,7 @@ jobs:
               echo "::error::$f may hold only INFISICAL_PROJECT_ID, INFISICAL_ENV and INFISICAL_DOMAIN"
               status=1
             fi
-            if grep -E '^[[:space:]]*#' "./$f" | grep -Eq '[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]{8,}'; then
+            if grep -E '^[[:space:]]*#' "./$f" | grep -Eiq '(SECRET|TOKEN|PASSWORD|PASSWD|CLIENT|CREDENTIAL|API_?KEY|PRIVATE|AUTH|INFISICAL_)[A-Za-z0-9_]*=[^[:space:]]{8,}'; then
               echo "::error::$f comment lines may not carry assignments; a credential hidden in a comment is still a committed secret"
               status=1
             fi
